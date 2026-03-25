@@ -1,0 +1,270 @@
+#include 'totvs.ch'
+#include 'topconn.ch'
+
+//-----------------------------------------------------------------
+/*/{Protheus.doc} gerClassVal
+Popular os campos da tabela CT2_CLVLDB e CT2_CLVLCR
+
+@type       Function
+@author     Julio Lisboa
+@since      28/04/2025
+/*/
+//-----------------------------------------------------------------
+User Function gerClassVal()
+	private lSimulacao		:= .F.
+	private cDiretLog       := getTempPath()
+	private cArqLog         := "LOG_CT2_CLASS_VAL_" + DTOS(DATE()) + "_" + StrTran(time(),":","") + ".txt"
+
+	fPerg()
+
+return
+
+//-----------------------------------------------------------------
+static function fPerg()
+	local aParamBox		:= {}
+	local aOpcSaldo     := montaOpcSaldo()
+	local aOpcSimNao	:= {"1=Sim","2=Nao"}
+	private bValidDt    := { || vldData() }
+
+	aAdd(aParamBox,{1,"Data de"			,Ctod("")	,""	,"Eval(bValidDt)",""	,""	,60,.T.}) //MV_PAR01
+	aAdd(aParamBox,{1,"Data Ate"        ,Ctod("")	,""	,"Eval(bValidDt)",""	,""	,60,.T.}) //MV_PAR02
+	aAdd(aParambox,{1,"Filial de"       ,Space(TamSx3("CT2_FILIAL")[1]),"","","SM0","",70,.F.})// MV_PAR03
+	aAdd(aParambox,{1,"Filial ate"      ,Space(TamSx3("CT2_FILIAL")[1]),"","","SM0","",70,.T.})// MV_PAR04
+	aAdd(aParamBox,{2,"Tipo Saldo",     "1",aOpcSaldo, 80, '.T.', .T.}) //MV_PAR05
+	aAdd(aParamBox,{2,"Simulação",     	"2",aOpcSimNao, 60, '.T.', .T.}) //MV_PAR06
+
+	If ParamBox(aParamBox,"Parametros",,,,.T.,,,,"gerClassVal",.T.,.T.)
+		lSimulacao		:= Alltrim(MV_PAR06) == "1"
+		Processa( { || fProcess() } )
+	endif
+
+return
+
+//-----------------------------------------------------------------
+static function vldData()
+	local lRet      := .T.
+	If &(readvar()) < stod("20250301")
+		lRet    := .F.
+		FwAlertError("Data inicial inferior a 01/03/2025 - Operação não permitida",FunDesc())
+	endif
+return lRet
+
+//-----------------------------------------------------------------
+static function montaOpcSaldo()
+	local cQuery        := ""
+	local cAlias        := getnextAlias()
+	local nQtdRegs      := 0
+	local aRet          := {}
+
+	cQuery  += "SELECT" + CRLF
+	cQuery  += "    X5_CHAVE,X5_DESCRI" + CRLF
+	cQuery  += "FROM" + CRLF
+	cQuery  += "    " + retsqlname("SX5") + " SX5" + CRLF
+	cQuery  += "WHERE" + CRLF
+	cQuery  += "    SX5.D_E_L_E_T_ = ' '" + CRLF
+	cQuery  += "    AND X5_TABELA = 'SL' " + CRLF
+
+	TcQuery cQuery new alias &cAlias
+	Count to nQtdRegs
+	(cAlias)->(DbGoTop())
+
+	if (cAlias)->(!Eof())
+		while (cAlias)->(!eof())
+			aAdd( aRet , alltrim( (cAlias)->X5_CHAVE ) + "=" + alltrim( (cAlias)->X5_DESCRI ) )
+			(cAlias)->(dbSkip())
+		endDo
+	endif
+	(cAlias)->(DbCloseArea())
+return aRet
+
+//-----------------------------------------------------------------
+static function fProcess()
+	local cQuery        := ""
+	local cMsgLog       := ""
+	local cAlias        := getnextAlias()
+	local nQtdRegs      := 0
+	local nReg          := 0
+	local aAreaCT2      := CT2->(GetArea())
+	local lLog          := .F.
+	local lAjust        := .F.
+
+	cQuery  += "SELECT" + CRLF
+	cQuery  += "    DISTINCT " + CRLF
+	cQuery  += "	'DEBITO' AS TIPO," + CRLF
+	cQuery  += "    CT2_CLVLDB" + CRLF
+	cQuery  += "    ,CT1_DEB.CT1_CONTA CONTA_DEB" + CRLF
+	cQuery  += "    ,CT1_DEB.CT1_GRUPO GRUP_DEB" + CRLF
+	cQuery  += "	,'' CONTA_CRED" + CRLF
+	cQuery  += "	,'' GRUP_CRED" + CRLF
+	cQuery  += "    ,CT2.R_E_C_N_O_ AS CT2_REC" + CRLF
+	cQuery  += "FROM" + CRLF
+	cQuery  += "    " + retsqlname("CT2") + " CT2" + CRLF
+	cQuery  += "LEFT JOIN " + retsqlname("CT1") + " CT1_DEB ON CT1_DEB.D_E_L_E_T_  = ' '" + CRLF
+	cQuery  += "    AND CT1_DEB.CT1_CONTA = CT2_DEBITO" + CRLF
+	cQuery  += "WHERE" + CRLF
+	cQuery  += "    CT2.D_E_L_E_T_ = ' '" + CRLF
+	cQuery  += "    AND CT2_FILIAL BETWEEN '" + MV_PAR03 + "' AND '" + MV_PAR04 + "'" + CRLF
+	cQuery  += "    AND CT2_DATA BETWEEN '" + DTOS(MV_PAR01) + "' AND '" + DTOS(MV_PAR02) + "'" + CRLF
+	cQuery  += "    AND CT2_TPSALD = '" + MV_PAR05 + "' " + CRLF
+	cQuery  += "    AND CT2_CLVLDB = ''" + CRLF
+	cQuery  += "	AND CT1_DEB.CT1_GRUPO <> ''" + CRLF
+	cQuery  += "	" + CRLF
+	cQuery  += "UNION ALL" + CRLF
+	cQuery  += "" + CRLF
+	cQuery  += "SELECT" + CRLF
+	cQuery  += "    DISTINCT " + CRLF
+	cQuery  += "	'CREDITO' AS TIPO," + CRLF
+	cQuery  += "    CT2_CLVLCR" + CRLF
+	cQuery  += "    ,'' CONTA_DEB" + CRLF
+	cQuery  += "    ,'' GRUP_DEB" + CRLF
+	cQuery  += "    ,CT1_CRED.CT1_CONTA CONTA_CRED" + CRLF
+	cQuery  += "	,CT1_CRED.CT1_GRUPO GRUP_CRED" + CRLF
+	cQuery  += "    ,CT2.R_E_C_N_O_ AS CT2_REC" + CRLF
+	cQuery  += "FROM" + CRLF
+	cQuery  += "    " + retsqlname("CT2") + " CT2" + CRLF
+	cQuery  += "LEFT JOIN " + retsqlname("CT1") + " CT1_CRED ON CT1_CRED.D_E_L_E_T_  = ' '" + CRLF
+	cQuery  += "    AND CT1_CRED.CT1_CONTA = CT2_CREDIT" + CRLF
+	cQuery  += "WHERE" + CRLF
+	cQuery  += "    CT2.D_E_L_E_T_ = ' '" + CRLF
+	cQuery  += "    AND CT2_FILIAL BETWEEN '" + MV_PAR03 + "' AND '" + MV_PAR04 + "'" + CRLF
+	cQuery  += "    AND CT2_DATA BETWEEN '" + DTOS(MV_PAR01) + "' AND '" + DTOS(MV_PAR02) + "'" + CRLF
+	cQuery  += "    AND CT2_TPSALD = '" + MV_PAR05 + "' " + CRLF
+	cQuery  += "    AND CT2_CLVLCR = ''" + CRLF
+	cQuery  += "	AND CT1_CRED.CT1_GRUPO <> ''" + CRLF
+
+	TcQuery cQuery new alias &cAlias
+	Count to nQtdRegs
+	(cAlias)->(DbGoTop())
+
+	if (cAlias)->(!Eof())
+		CT2->(DbSetOrder(1)) //CT2_FILIAL+DTOS(CT2_DATA)+CT2_LOTE+CT2_SBLOTE+CT2_DOC+CT2_LINHA+CT2_TPSALD+CT2_EMPORI+CT2_FILORI+CT2_MOEDLC
+		ProcRegua( nQtdRegs )
+
+		BEGIN TRANSACTION
+
+			while (cAlias)->(!eof())
+				IncProc("Processando registro " + cValToChar(++nReg) + " de " + cValToChar(nQtdRegs) + "...")
+				CT2->(DbGoTo( (cAlias)->CT2_REC ))
+				lLog        := .F.
+
+				If Empty( CT2->CT2_CLVLDB ) .AND. !Empty( (cAlias)->GRUP_DEB )
+					lLog        := .T.
+					lAjust      := .T.
+					gravaGrupoDeb( (cAlias)->GRUP_DEB )
+				endif
+
+				if Empty( CT2->CT2_CLVLCR ) .AND. !Empty( (cAlias)->GRUP_CRED )
+					lLog        := .T.
+					lAjust      := .T.
+					gravaGrupoCred( (cAlias)->GRUP_CRED )
+				endif
+
+				if lLog
+					cMsgLog     := "Data: " + dtoc( CT2->CT2_DATA )
+					cMsgLog     += "| Lote: " + alltrim(CT2->CT2_LOTE)
+					cMsgLog     += "| S.lote: " + alltrim(CT2->CT2_SBLOTE)
+					cMsgLog     += "| Docto.: " + alltrim(CT2->CT2_DOC)
+					cMsgLog     += "| Cta Debito: " + alltrim( (cAlias)->CONTA_DEB )
+					cMsgLog     += "| Cta Credito: " + alltrim( (cAlias)->CONTA_CRED )
+					cMsgLog     += "| Linha: " + alltrim(CT2->CT2_LINHA)
+					cMsgLog     += "| Cl.Vlr.Deb: " + alltrim(CT2->CT2_CLVLDB)
+					cMsgLog     += "| Cl.Vlr. Cred: " + alltrim(CT2->CT2_CLVLCR)
+					cMsgLog     += "| User: " + alltrim(cUserName)
+					cMsgLog     += "| " + dtoc(date()) + " " + time() + ""
+					geraLog(cMsgLog)
+				endif
+
+				(cAlias)->(dbSkip())
+			endDo
+
+			If lSimulacao
+				DisarmTransaction()
+			endif
+
+		end TRANSACTION
+
+		if lAjust
+			If lSimulacao
+				FWAlertInfo("Rotina executada em modo SIMULAÇÃO - Nenhum registro foi ajustado efetivamente.",FunDesc())
+			endif
+			If file(cDiretLog + cArqLog)
+				FWAlertSuccess("Log gerado com sucesso em: " + cDiretLog + cArqLog,FunDesc())
+				ShellExecute( "Open", cArqLog,"",cDiretLog, 1 )
+			else
+				FwAlertError("Não foi possível abrir o arquivo de log " + cDiretLog + cArqLog,FunDesc())
+			endif
+		else
+			if !lSimulacao
+				FWAlertInfo("Nenhum registro foi alterado!",FunDesc())
+			endif
+		endif
+	else
+		FwAlertError("Nenhum registro foi localizado com os parâmetros informados!",FunDesc())
+	endif
+	(cAlias)->(DbCloseArea())
+	restArea(aAreaCT2)
+
+return
+
+//-----------------------------------------------------------------
+static function gravaGrupoDeb(cGrupo)
+	If RecLock("CT2",.F.)
+		CT2->CT2_CLVLDB     := cGrupo
+		CT2->(MsUnlock())
+	endif
+return
+
+//-----------------------------------------------------------------
+static function gravaGrupoCred(cGrupo)
+	If RecLock("CT2",.F.)
+		CT2->CT2_CLVLCR     := cGrupo
+		CT2->(MsUnlock())
+	endif
+return
+
+
+//-----------------------------------------------------------------
+Static Function geraLog( cMensagem )
+
+	local nHandle		:= 0
+	local cTexto		:= ""
+
+	If !ExistDir( cDiretLog )
+		MakeDir( cDiretLog )
+	endif
+
+	If file( cDiretLog + cArqLog )
+		nHandle	:= FOpen( cDiretLog + cArqLog ,2)
+	else
+		nHandle := FCreate( cDiretLog + cArqLog )
+	endif
+
+	if nHandle > 0
+		FSEEK(nHandle, 0, 2)
+		cTexto		:= 	cMensagem + CRLF
+		conout(cTexto)
+		fWrite(nHandle, cTexto )
+		fClose(nHandle)
+	endif
+
+Return
+
+
+
+/*
+    local cQuery        := ""
+    local cQuery        := getnextAlias()
+    local nQtdRegs      := 0
+
+    TcQuery cQuery new alias &cnQtdRegs
+    Count to nQtdRegs
+    (cAlias)->(DbGoTop())
+
+    if (cAlias)->(!Eof())
+        while (cAlias)->(!eof())
+
+            (cAlias)->(dbSkip())
+        endDo
+    endif
+    (cAlias)->(DbCloseArea())
+*/

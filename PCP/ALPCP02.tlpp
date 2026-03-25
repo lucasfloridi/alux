@@ -1,0 +1,175 @@
+#include 'totvs.ch'
+#include 'topconn.ch'
+
+//-----------------------------------------------------------------
+/*/{Protheus.doc} ALPCP02
+Estorno das requisições de DGF (despesas gerais de fabricação)
+
+@type       Function
+@author     Julio Lisboa
+@since      24/04/2025
+/*/
+//-----------------------------------------------------------------
+User Function ALPCP02(lInPE)
+	default lInPE		:= .F.
+
+	if lInPE .OR. FWISINCALLSTACK("U_MT680GREST")
+		BEGIN TRANSACTION
+			If buscaDadosOP(SD3->D3_FILIAL,SD3->D3_OP,SD3->D3_DOC)
+				gravaStatus( SD3->D3_FILIAL, SD3->D3_OP , SD3->D3_DOC )
+			else
+				DisarmTransaction()
+			endif
+		END TRANSACTION
+	endif
+
+return
+
+//-----------------------------------------------------------------
+static function buscaDadosOP(cFilOP,cNumOP,cDoc)
+	local cQuery	:= ""
+	local cAlias	:= getnextAlias()
+	local nTotReg	:= 0
+	local aAreaSD3	:= SD3->(GetArea())
+	local lRet		:= .F.
+
+	default cFilOP	:= ""
+	default cNumOP	:= ""
+	default cDoc	:= ""
+
+	cQuery	+= "SELECT" + CRLF
+	cQuery	+= "	DISTINCT SD3_503.D3_FILIAL, SD3_503.D3_DOC" + CRLF
+	cQuery	+= "FROM" + CRLF
+	cQuery	+= "	" + retsqlname("SD3") + " SD3_AP" + CRLF
+	cQuery	+= "INNER JOIN " + retsqlname("SD3") + " SD3_503 ON SD3_503.D_E_L_E_T_ = ' '" + CRLF
+	cQuery	+= "	AND SD3_503.D3_FILIAL = SD3_AP.D3_FILIAL" + CRLF
+	cQuery	+= "	AND SD3_503.D3_ZZID = SD3_AP.D3_ZZID" + CRLF
+	cQuery	+= "	AND SD3_503.D3_TM = '503'" + CRLF
+	cQuery	+= "	AND SD3_503.D3_ESTORNO = ''" + CRLF
+	cQuery	+= "WHERE" + CRLF
+	cQuery	+= "	SD3_AP.D_E_L_E_T_ = ' '" + CRLF
+	cQuery	+= "	AND SD3_AP.D3_FILIAL = '" + cFilOP + "'" + CRLF
+	cQuery	+= "	AND SD3_AP.D3_OP = '" + cNumOP + "'" + CRLF
+	cQuery	+= "	AND SD3_AP.D3_DOC = '" + cDoc +"'" + CRLF
+	cQuery	+= "	AND SD3_AP.D3_ESTORNO = 'S'" + CRLF
+	cQuery	+= "	AND SD3_AP.D3_ZZID <> '' " + CRLF
+
+	TcQuery cQuery new alias &cAlias
+	Count to nTotReg
+	(cAlias)->(DbGoTop())
+
+	if (cAlias)->(!Eof())
+		SD3->(DbSetOrder(2)) //D3_FILIAL+D3_DOC+D3_COD
+		while (cAlias)->(!Eof())
+			If SD3->(DbSeek( (cAlias)->D3_FILIAL + (cAlias)->D3_DOC )) //.AND. alltrim(SD3->D3_TM) == "503"
+				If fProcess()
+					gravaStatus( SD3->D3_FILIAL, SD3->D3_OP , SD3->D3_DOC )
+					lRet		:= .T.
+				else
+					lRet		:= .F.
+					exit
+				endif
+			endif
+			(cAlias)->(DbSkip())
+		endDo
+	endif
+	(cAlias)->(DbCloseArea())
+	restArea(aAreaSD3)
+
+return lRet
+
+//-----------------------------------------------------------------
+static function fProcess()
+
+	local aCab                  := {}
+	local lRet                  := .F.
+	local aAreaSD3				:= SD3->(GetArea())
+	local nOperac				:= 6
+
+	private lMsErroAuto			:= .F.
+	private lMsHelpAuto	    	:= .T.
+	private lAutoErrNoFile		:= .T.
+
+	aAdd( aCab, {"D3_DOC",		SD3->D3_DOC,			nil })
+	aAdd( aCab, {"AUTOESTORN",	"DOC",					nil })
+
+	MSExecAuto({|x,y,z| MATA241(x,y,z)},aCab,Nil,nOperac)
+	If lMsErroAuto
+		cErro		:= retornaErro()
+		FwAlertError("ERRO" + CRLF + CRLF + cErro,FunDesc())
+	else
+		lRet		:= .T.
+	EndIf
+
+	restArea(aAreaSD3)
+
+return lRet
+
+//-----------------------------------------------------------------
+static function retornaErro()
+	local aLog			:= {}
+	local nErro			:= 0
+	local cErro			:= ""
+	aLog        := GetAutoGRLog()
+	For nErro := 1 To Len(aLog)
+		If !Empty(cErro)
+			cErro += CRLF
+		EndIf
+		cErro += aLog[nErro]
+	Next nErro
+return cErro
+
+//-----------------------------------------------------------------
+static function gravaStatus(cFilOP,cOP,cDoc)
+	local cQuery	:= ""
+	local cAlias	:= getnextAlias()
+	local aAreaSD3	:= SD3->(GetArea())
+
+	default cFilOP	:= FwXFilial("SD3")
+	default cOP		:= ""
+	default cDoc	:= ""
+
+	cQuery	+= "SELECT" + CRLF
+	cQuery	+= "	SD3.R_E_C_N_O_ AS REC_SD3 " + CRLF
+	cQuery	+= "FROM" + CRLF
+	cQuery	+= "	" + retsqlname("SD3") + " SD3" + CRLF
+	cQuery	+= "WHERE" + CRLF
+	cQuery	+= "	SD3.D_E_L_E_T_ = ' '" + CRLF
+	cQuery	+= "	AND D3_FILIAL = '" + cFilOP + "'" + CRLF
+	cQuery	+= "	AND D3_OP = '" + cOP + "'" + CRLF
+
+	if !Empty(cDoc)
+		cQuery	+= "	AND D3_DOC = '" + cDoc + "'" + CRLF
+	endif
+
+	cQuery	+= "	AND D3_ESTORNO = 'S'" + CRLF
+
+	TcQuery cQuery new alias &cAlias
+	if (cAlias)->(!Eof())
+		SD3->(DbSetOrder(1)) //D3_FILIAL+D3_OP+D3_COD+D3_LOCAL
+		while (cAlias)->(!Eof())
+			SD3->(DbGoTo( (cAlias)->REC_SD3 ))
+			if Reclock("SD3",.F.)
+				SD3->D3_ZZINT		:= "E"
+				SD3->D3_ZZDTINT		:= DTOC(Date()) + " - " + Time()
+				SD3->(MsUnlock())
+			endif
+			(cAlias)->(DbSkip())
+		endDo
+	endif
+	(cAlias)->(DbCloseArea())
+	restArea(aAreaSD3)
+
+return
+
+/*
+user function ZZTST1()
+	rpcsetenv("01","0101")
+	SD3->(DbSetOrder(2)) //D3_FILIAL+D3_DOC+D3_COD
+	SD3->(DbGoto( 157784 ))
+	
+	U_ALPCP02(.T.)
+
+	rpcclearenv()
+return
+*/

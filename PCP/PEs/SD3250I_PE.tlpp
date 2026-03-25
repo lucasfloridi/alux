@@ -1,0 +1,55 @@
+#include 'totvs.ch'
+#include 'topconn.ch'
+
+//-----------------------------------------------------------------
+/*/{Protheus.doc} SD3250I
+Executado na função A250Atu(), rotina responsável pela atualização 
+das tabelas de apontamentos de produção simples.
+DESCRIÇÃO : Após atualização dos arquivos na rotina de produções. 
+Executa após atualizar SD3, SB2, SB3 e SC2.
+
+@type       Function
+@author     Julio Lisboa
+@since      22/04/2025
+/*/
+//-----------------------------------------------------------------
+User Function SD3250I()
+
+	If existblock("ALPCP01") .and. getnewpar('ZZ_ALPCP0',.T.)
+        gravaCC(SD3->D3_OP)
+		U_ALPCP01(.T.)
+	endif
+
+return
+
+//-----------------------------------------------------------------
+static function gravaCC(cOP)
+	local cQuery        := ""
+	local cAlias        := getnextAlias()
+	local aAreaSD3      := SD3->(GetArea())
+
+	cQuery  += "SELECT" + CRLF
+	cQuery  += "    SD3.R_E_C_N_O_ AS D3_RECNO" + CRLF
+	cQuery  += "    ,B1_CCCUSTO" + CRLF
+	cQuery  += "FROM" + CRLF
+	cQuery  += "    " + retsqlname("SD3") + " SD3" + CRLF
+	cQuery  += "INNER JOIN " + retsqlname("SB1") + " SB1 ON SB1.D_E_L_E_T_ = ' '" + CRLF
+	cQuery  += "    AND B1_COD = D3_COD" + CRLF
+	cQuery  += "WHERE" + CRLF
+	cQuery  += "    SD3.D_E_L_E_T_ = ' '" + CRLF
+	cQuery  += "    AND D3_OP = '" + cOP + "'" + CRLF
+	cQuery  += "    AND B1_CCCUSTO <> ''" + CRLF
+	cQuery  += "    AND D3_CC = ''" + CRLF
+
+	TcQuery cQuery new alias &cAlias
+	while (cAlias)->(!eof())
+		SD3->(DbGoTo( (cAlias)->D3_RECNO ))
+		If Reclock("SD3",.F.)
+			SD3->D3_CC  := (cAlias)->B1_CCCUSTO
+			SD3->(MsUnlock())
+		endif
+		(cAlias)->(Dbskip())
+	endDo
+	(cAlias)->(DbCloseArea())
+	restArea(aAreaSD3)
+return

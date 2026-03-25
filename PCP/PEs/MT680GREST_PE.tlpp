@@ -1,0 +1,20 @@
+#include 'totvs.ch'
+#include 'topconn.ch'
+
+//-----------------------------------------------------------------
+/*/{Protheus.doc} MT680GREST
+É executado após o estorno do movimento da produção, e permite 
+executar qualquer ação definida pelo operador.
+
+@type       Function
+@author     Julio Lisboa
+@since      25/04/2025
+/*/
+//-----------------------------------------------------------------
+User Function MT680GREST()
+
+	If existblock("ALPCP02") .and. getnewpar('ZZ_ALPCP1',.T.)
+		U_ALPCP02(.T.)
+	endif
+
+return
