@@ -34,7 +34,7 @@ Return
 
 Static Function Gera()
 	Local _x
-	createView()
+	// createView()
 	cQry := " SELECT * "
 	cQry += " FROM V_MOVIMENTOS "
 	cQry += " WHERE FILIAL BETWEEN '"+(MV_PAR03) +"' AND '"+(MV_PAR04)+"' "
