@@ -1,0 +1,523 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ImportadorApontamento
+
+using namespace Alux.PCP.ConstrutorOP
+using namespace Alux.PCP.GeradorRelatorio
+using namespace Alux.PCP.LeitorPlanilha
+using namespace Alux.PCP.ProcessadorOP
+using namespace Alux.PCP.RepositorioStaging
+using namespace Alux.PCP.ValidadorDados
+
+/*/{Protheus.doc} ImportadorApontamento
+Controller da importacao de apontamento de producao (NOVO MODELO -
+t_producao / t_operacao / t_materia_primas). Le os 3 arquivos, junta por
+ordem_producao e processa CADA OP do inicio ao fim, uma de cada vez
+(valida -> grava Z01 -> cria OP/empenho/apontamento via ProcessadorOP ->
+finaliza), so entao passando para a proxima. Produto/roteiro/operacao/
+recurso vem explicitos - sem tabelas auxiliares.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@version 12.1.2410
+/*/
+Class ImportadorApontamento
+
+    Private Data cArqProducao  as character
+    Private Data cArqOperacao  as character
+    Private Data cArqMatPrima  as character
+    Public  Data cLote         as character
+    Public  Data aResultados   as array
+
+    Private Data oLeitor       as object
+    Private Data oValid        as object
+    Private Data oConstOP      as object
+    Private Data oStaging      as object
+    Private Data oProc         as object
+    Private Data oRelat        as object
+
+    Public  Method New(cArqProducao, cArqOperacao, cArqMatPrima) Constructor
+    Public  Method Executar()
+    Public  Method GerarLote()
+    Private Method FaseImportar()
+    Private Method IndexarPorChave(aLista, cProp)
+    Private Method MontarResultado(oCab, cStatus, cMsg, cChvIdem)
+    Private Method MontarResultadoProc(oDadosOP, oRet)
+    Private Method ExtrairNumOp(cOrdProd)
+    Private Method GetSafe(oObj, cChave, xDefault)
+    Private Method ArquivarMovimento()
+
+EndClass
+
+/*/{Protheus.doc} ImportadorApontamento:New
+Construtor. Recebe os caminhos dos 3 arquivos (producao, operacao,
+materia_primas) e instancia as dependencias.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param cArqProducao, Character, Caminho do t_producao.csv
+@param cArqOperacao, Character, Caminho do t_operacao.csv
+@param cArqMatPrima, Character, Caminho do t_materia_primas.csv
+@return Self
+/*/
+Method New(cArqProducao, cArqOperacao, cArqMatPrima) Class ImportadorApontamento
+
+    ::cArqProducao := cArqProducao
+    ::cArqOperacao := cArqOperacao
+    ::cArqMatPrima := cArqMatPrima
+    ::cLote        := ::GerarLote()
+    ::aResultados  := {}
+
+    ::oLeitor  := LeitorPlanilha():New()
+    ::oValid   := ValidadorDados():New()
+    ::oStaging := RepositorioStaging():New(::cLote)
+    ::oProc    := ProcessadorOP():New()
+    ::oConstOP := ConstrutorOP():New()   // so para FormatarNumOp na fase 1
+    ::oRelat   := GeradorRelatorio():New(::cLote)
+
+Return Self
+
+/*/{Protheus.doc} ImportadorApontamento:Executar
+Executa a importacao (processa cada OP do inicio ao fim) e emite o
+relatorio. Sem pre-condicao de tabelas auxiliares (modelo novo nao usa
+RM/REVISAO2).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Logical, .T. se nao houver erro fatal
+/*/
+Method Executar() Class ImportadorApontamento
+Local nPend := 0 as numeric
+Local nI    := 0 as numeric
+
+    ::oStaging:CarregarCacheIdem(CACHE_IDEM_DIAS)
+
+    ::FaseImportar()
+
+    // Conta resultados que NAO sao sucesso pleno (E/W/I/P/R). Qualquer pendencia
+    // abre o relatorio; o aviso de sucesso so aparece quando TUDO ficou OK.
+    For nI := 1 To Len(::aResultados)
+        If AllTrim(cValToChar(::GetSafe(::aResultados[nI], "cStatus", ""))) != STATUS_OK
+            nPend++
+        EndIf
+    Next nI
+
+    // Gera o relatorio sempre (auditoria), mas SO abre o Excel quando houver
+    // alguma pendencia. Tudo OK: apenas confirma o sucesso.
+    ::oRelat:Gerar(::aResultados)
+    ::oRelat:GerarCsv(::aResultados)
+
+    If nPend > 0
+        ::oRelat:Abrir()
+    Else
+        FWAlertSuccess("Importacao concluida com sucesso - " + cValToChar(Len(::aResultados)) + ;
+                       " registro(s), sem erros.", "Importacao PCPI001")
+    EndIf
+
+    ::ArquivarMovimento()
+
+Return .T.
+
+/*/{Protheus.doc} ImportadorApontamento:GerarLote
+Gera o numero do lote (timestamp + ThreadId).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Character, Lote gerado
+/*/
+Method GerarLote() Class ImportadorApontamento
+Local cSeq := "" as character
+
+    cSeq := SubStr(DtoS(dDataBase), 3, 6) + StrTran(Time(), ":", "") + StrZero(ThreadId(), 5)
+    ::cLote := cSeq
+
+Return cSeq
+
+/*/{Protheus.doc} ImportadorApontamento:FaseImportar
+Le os 3 arquivos (t_producao, t_operacao, t_materia_primas), indexa
+operacoes e materias-primas por ordem_producao e processa CADA OP do
+inicio ao fim, uma de cada vez: valida (cabecalho/operacoes/materias),
+grava o staging na Z01, processa (cria OP/empenho/apontamento via
+ProcessadorOP) e finaliza (atualiza o status ou remove da Z01 se a OP nao
+entrou no sistema) - so entao passa para a proxima OP. OP repetida no
+mesmo arquivo e processada uma unica vez.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Nil
+/*/
+Method FaseImportar() Class ImportadorApontamento
+Local aProducao := {} as array
+Local aOperacao := {} as array
+Local aMatPrima := {} as array
+Local oIdxApo   := Nil as object
+Local oIdxEmp   := Nil as object
+Local oOpsRun   := JsonObject():New() as object
+Local oRet      := Nil as object
+Local oErr      := Nil as object
+Local nI        := 0 as numeric
+Local nK        := 0 as numeric
+Local oCab      := Nil as object
+Local oDadosOP  := Nil as object
+Local oResVld   := Nil as object
+Local oResLin   := Nil as object
+Local cHash     := "" as character
+Local cOrdProd  := "" as character
+Local cOrdSep   := "" as character
+Local cOpProt   := "" as character
+Local dDtRef    := dDataBase as date
+Local aApoOP    := {} as array
+Local aEmpOP    := {} as array
+Local aApoValid := {} as array
+Local aEmpValid := {} as array
+Local nDescApo  := 0  as numeric
+Local nDescEmp  := 0  as numeric
+Local cDescEmp  := "" as character
+Local cCodDesc  := "" as character
+
+    // le os 3 arquivos
+    aProducao := ::oLeitor:Ler(::cArqProducao, "PRODUCAO")
+    aOperacao := ::oLeitor:Ler(::cArqOperacao, "OPERACAO")
+    aMatPrima := ::oLeitor:Ler(::cArqMatPrima, "MATERIA_PRIMA")
+
+    ConOut("[PCPI001][DIAG] linhas: aProducao=" + cValToChar(Len(aProducao)) + ;
+           " aOperacao=" + cValToChar(Len(aOperacao)) + " aMatPrima=" + cValToChar(Len(aMatPrima)))
+
+    // indexa por ordem_producao
+    oIdxApo := ::IndexarPorChave(aOperacao, "cOrdProd")
+    oIdxEmp := ::IndexarPorChave(aMatPrima, "cOrdProd")
+
+    For nI := 1 To Len(aProducao)
+        oCab     := aProducao[nI]
+        cOrdProd := AllTrim(cValToChar(::GetSafe(oCab, "cOrdProd", "")))
+
+        // valida cabecalho da OP (t_producao)
+        oResVld := ::oValid:ValidarProducao(oCab)
+        If !oResVld["lValido"]
+            aAdd(::aResultados, ::MontarResultado(oCab, oResVld["cClassificacao"], oResVld["cMotivo"], ""))
+            Loop
+        EndIf
+
+        // operacoes (apontamentos) desta OP
+        aApoOP    := IIf(oIdxApo:HasProperty(cOrdProd), oIdxApo[cOrdProd], {})
+        aApoValid := {}
+        nDescApo  := 0
+        For nK := 1 To Len(aApoOP)
+            oResLin := ::oValid:ValidarOperacao(aApoOP[nK])
+            If oResLin["lValido"]
+                aAdd(aApoValid, aApoOP[nK])
+            Else
+                nDescApo++   // acumula; 1 linha consolidada depois (evita duplicatas)
+            EndIf
+        Next nK
+
+        // OP sem operacao valida - nao processa (sem apontamento)
+        If Len(aApoValid) == 0
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_IGN, ;
+                "OP sem operacao valida no t_operacao - nao processada", ""))
+            Loop
+        EndIf
+
+        // materias-primas (empenhos) desta OP
+        aEmpOP    := IIf(oIdxEmp:HasProperty(cOrdProd), oIdxEmp[cOrdProd], {})
+        aEmpValid := {}
+        nDescEmp  := 0
+        cDescEmp  := ""
+        For nK := 1 To Len(aEmpOP)
+            oResLin := ::oValid:ValidarMatPrima(aEmpOP[nK])
+            If oResLin["lValido"]
+                aAdd(aEmpValid, aEmpOP[nK])
+            Else
+                nDescEmp++   // acumula; 1 linha consolidada depois (evita duplicatas)
+                cCodDesc := AllTrim(cValToChar(::GetSafe(aEmpOP[nK], "cCodSucata", "")))
+                cDescEmp += IIf(Empty(cDescEmp), "", ", ") + IIf(Empty(cCodDesc), "?", cCodDesc)
+            EndIf
+        Next nK
+
+        // ordem de separacao para exibicao (vem das operacoes)
+        cOrdSep := AllTrim(cValToChar(::GetSafe(aApoValid[1], "cOrdSep", "")))
+
+        // data de emissao da OP (define o ano do numero) - mesma resolucao
+        // do ProcessadorOP: dt_emissao -> previsao_inicio -> data base
+        dDtRef := dDataBase
+        If ValType(::GetSafe(oCab, "dEmissao", Nil)) == "D" .And. !Empty(::GetSafe(oCab, "dEmissao", Nil))
+            dDtRef := oCab["dEmissao"]
+        ElseIf ValType(::GetSafe(oCab, "dInicio", Nil)) == "D" .And. !Empty(::GetSafe(oCab, "dInicio", Nil))
+            dDtRef := oCab["dInicio"]
+        EndIf
+
+        // monta oDadosOP
+        oDadosOP := JsonObject():New()
+        oDadosOP["cLote"]    := ::cLote
+        oDadosOP["cOpOrig"]  := cOrdProd
+        oDadosOP["cOp"]      := ::ExtrairNumOp(cOrdProd)
+        oDadosOP["cOpProt"]  := ::oConstOP:FormatarNumOp(cOrdProd, dDtRef)
+        oDadosOP["cOrdSep"]  := cOrdSep
+        oDadosOP["cLiga"]    := AllTrim(cValToChar(::GetSafe(oCab, "cLigaProd", "")))
+        oDadosOP["cUser"]    := RetCodUsr()
+        oDadosOP["cUserNm"]  := UsrFullName(RetCodUsr())
+        oDadosOP["cArquivo"] := ::cArqProducao
+        oDadosOP["oCab"]     := oCab
+        oDadosOP["aEmp"]     := aEmpValid
+        oDadosOP["aApo"]     := aApoValid
+
+        cOpProt := AllTrim(cValToChar(oDadosOP["cOpProt"]))
+
+        // numero de OP invalido (FormatarNumOp vazio) - nao importa
+        If Empty(cOpProt)
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_ERRO, ;
+                "Numero de OP invalido (origem " + cOrdProd + ") - nao importada", ""))
+            Loop
+        EndIf
+
+        // hash + idempotencia (mesma OP/conteudo ja processada antes)
+        cHash := ::oStaging:GerarHash(oDadosOP)
+        oDadosOP["cHash"] := cHash
+        If ::oStaging:JaProcessado(cHash)
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_IGN, "OP ja processada anteriormente", cHash))
+            Loop
+        EndIf
+
+        // OP duplicada no MESMO arquivo (mesmo numero/ordem_producao): NAO importa
+        // a 2a ocorrencia, apenas registra no log que esta duplicada no arquivo.
+        If oOpsRun:HasProperty(cOpProt)
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_IGN, ;
+                "OP " + cOrdProd + " duplicada no arquivo - 2a ocorrencia ignorada (nao importada)", cHash))
+            Loop
+        EndIf
+
+        // OP ja existe na Z01 de execucao ANTERIOR (outro lote) - nao reimporta
+        If ::oStaging:ExisteOP(cOpProt, ::cLote)
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_ERRO, ;
+                "OP " + cOpProt + " ja existe na base (Z01) de importacao anterior - nao reimportada", cHash))
+            Loop
+        EndIf
+
+        // Itens descartados (qtd zero/invalida): 1 linha consolidada por OP, e SO
+        // para OPs que vao ser processadas (depois dos checks de duplicidade) -
+        // evita as linhas repetidas que apareciam por item e em OPs ignoradas.
+        If nDescApo > 0
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_WARN, ;
+                "OP " + cOrdProd + ": " + cValToChar(nDescApo) + " operacao(oes) descartada(s) (invalida/sem dados)", ""))
+        EndIf
+        If nDescEmp > 0
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_WARN, ;
+                "OP " + cOrdProd + ": " + cValToChar(nDescEmp) + " materia(s)-prima(s) descartada(s) (qtd zero/invalida): " + cDescEmp, ""))
+        EndIf
+
+        // grava o staging na Z01
+        If !::oStaging:GravarOP(oDadosOP)
+            aAdd(::aResultados, ::MontarResultado(oCab, STATUS_ERRO, "Falha ao gravar staging Z01", cHash))
+            Loop
+        EndIf
+        ::oStaging:MarcarCacheIdem(cHash)
+        oOpsRun[cOpProt] := .T.
+
+        // processa a OP (cria OP/empenho/apontamento) IMEDIATAMENTE - do inicio
+        // ao fim - antes de passar para a proxima OP.
+        Try
+            oRet := ::oProc:Processar(oDadosOP)
+        Catch oErr
+            oRet := JsonObject():New()
+            oRet["cStatus"] := STATUS_ERRO
+            oRet["cEtapa"]  := ETAPA_OP
+            oRet["cMsg"]    := "Excecao no processamento: " + ;
+                IIf(ValType(oErr) == "O", cValToChar(oErr:Description), "erro nao identificado")
+            oRet["nEmp"]    := 0
+            oRet["nApo"]    := 0
+            oRet["nSub"]    := 0
+        EndTry
+
+        // finaliza: remove da Z01 se a OP NAO entrou no sistema (estorno/rollback
+        // ou nao criada); senao atualiza o status normalmente.
+        If AllTrim(cValToChar(oRet["cStatus"])) == STATUS_ERRO .And. !::oConstOP:Existe(cOpProt)
+            ::oStaging:RemoverRecno(oDadosOP["nRecno"])
+        Else
+            ::oStaging:AtualizarStatusRecno(oDadosOP["nRecno"], oRet["cStatus"], oRet["cEtapa"], ;
+                                            oRet["cMsg"], oRet["nEmp"], oRet["nApo"], oRet["nSub"])
+        EndIf
+        aAdd(::aResultados, ::MontarResultadoProc(oDadosOP, oRet))
+    Next nI
+
+Return Nil
+
+/*/{Protheus.doc} ImportadorApontamento:IndexarPorChave
+Indexa uma lista por uma propriedade (hash chave -> array de itens).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aLista, Array, Lista a indexar
+@param cProp, Character, Propriedade chave
+@return Object, JsonObject chave -> array
+/*/
+Method IndexarPorChave(aLista, cProp) Class ImportadorApontamento
+Local oHash  := JsonObject():New() as object
+Local nI     := 0   as numeric
+Local oItem  := Nil as object
+Local cChave := ""  as character
+Local aLocal := {}  as array
+
+    For nI := 1 To Len(aLista)
+        oItem  := aLista[nI]
+        cChave := AllTrim(cValToChar(oItem[cProp]))
+        If Empty(cChave)
+            Loop
+        EndIf
+        If oHash:HasProperty(cChave)
+            aLocal := oHash[cChave]
+            aAdd(aLocal, oItem)
+            oHash[cChave] := aLocal
+        Else
+            oHash[cChave] := {oItem}
+        EndIf
+    Next nI
+
+Return oHash
+
+/*/{Protheus.doc} ImportadorApontamento:MontarResultado
+Monta o JsonObject de resultado de staging (IGN/WARN/ERRO) a partir do
+cabecalho da OP.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oCab, Object, Linha do t_producao
+@param cStatus, Character, Status
+@param cMsg, Character, Mensagem
+@param cChvIdem, Character, Hash de idempotencia
+@return Object, JsonObject consolidado
+/*/
+Method MontarResultado(oCab, cStatus, cMsg, cChvIdem) Class ImportadorApontamento
+Local oRet := JsonObject():New() as object
+
+    oRet["cNumOp"]        := AllTrim(cValToChar(::GetSafe(oCab, "cOrdProd", "")))
+    oRet["cOrdSep"]       := ""
+    oRet["cLigaProd"]     := AllTrim(cValToChar(::GetSafe(oCab, "cLigaProd", "")))
+    oRet["cStatus"]       := cStatus
+    oRet["cEtapa"]        := ETAPA_VALID
+    oRet["cMsg"]          := cMsg
+    oRet["cChaveIdem"]    := cChvIdem
+    oRet["nQtdProduzida"] := ::GetSafe(oCab, "nQtdProd", 0)
+    oRet["nEmpenhos"]     := 0
+    oRet["nApontamentos"] := 0
+    oRet["nSubprodutos"]  := 0
+
+Return oRet
+
+/*/{Protheus.doc} ImportadorApontamento:MontarResultadoProc
+Monta o JsonObject de resultado da fase 2 a partir do retorno do
+ProcessadorOP.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oDadosOP, Object, Objeto canonico da OP
+@param oRet, Object, Retorno do ProcessadorOP
+@return Object, JsonObject consolidado
+/*/
+Method MontarResultadoProc(oDadosOP, oRet) Class ImportadorApontamento
+Local oR := JsonObject():New() as object
+
+    oR["cNumOp"]        := AllTrim(cValToChar(::GetSafe(oDadosOP, "cOpOrig", "")))
+    oR["cOrdSep"]       := AllTrim(cValToChar(::GetSafe(oDadosOP, "cOrdSep", "")))
+    oR["cLigaProd"]     := AllTrim(cValToChar(::GetSafe(oDadosOP, "cLiga", "")))
+    oR["cStatus"]       := oRet["cStatus"]
+    oR["cEtapa"]        := oRet["cEtapa"]
+    oR["cMsg"]          := oRet["cMsg"]
+    oR["cChaveIdem"]    := AllTrim(cValToChar(::GetSafe(oDadosOP, "cHash", "")))
+    oR["nQtdProduzida"] := IIf(oDadosOP["oCab"] != Nil .and. oDadosOP["oCab"]:HasProperty("nQtdProd"), oDadosOP["oCab"]["nQtdProd"], 0)
+    oR["nEmpenhos"]     := oRet["nEmp"]
+    oR["nApontamentos"] := oRet["nApo"]
+    oR["nSubprodutos"]  := oRet["nSub"]
+
+Return oR
+
+/*/{Protheus.doc} ImportadorApontamento:ExtrairNumOp
+Extrai a parte numerica da ordem de producao (descarta sufixo apos "/").
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cOrdProd, Character, Ordem de producao
+@return Character, Parte numerica
+/*/
+Method ExtrairNumOp(cOrdProd) Class ImportadorApontamento
+Local cNum := AllTrim(cValToChar(cOrdProd)) as character
+Local nPos := At("/", cNum) as numeric
+
+    If nPos > 0
+        cNum := SubStr(cNum, 1, nPos - 1)
+    EndIf
+
+Return AllTrim(cNum)
+
+/*/{Protheus.doc} ImportadorApontamento:GetSafe
+Acesso seguro a uma propriedade de um JsonObject.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oObj, Object, JsonObject
+@param cChave, Character, Propriedade
+@param xDefault, Variant, Default
+@return Variant, Valor ou default
+/*/
+Method GetSafe(oObj, cChave, xDefault) Class ImportadorApontamento
+Local xValor := xDefault
+
+    If (ValType(oObj) == "J" .Or. ValType(oObj) == "O") .And. oObj:HasProperty(cChave)
+        xValor := oObj[cChave]
+    EndIf
+
+Return xValor
+
+/*/{Protheus.doc} ImportadorApontamento:ArquivarMovimento
+Move os 3 arquivos de movimento de PATH_MOV para PATH_MOVHIST (com o
+lote no nome) apos a importacao. Usa __CopyFile + FErase.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Nil
+/*/
+Method ArquivarMovimento() Class ImportadorApontamento
+Local aArqs    := {} as array
+Local cHistDir := "" as character
+Local cNome    := "" as character
+Local cDest    := "" as character
+Local nI       := 0  as numeric
+Local nPos     := 0  as numeric
+
+    cHistDir := PATH_MOVHIST
+    Do While Len(cHistDir) > 0 .And. Right(cHistDir, 1) == "\"
+        cHistDir := Left(cHistDir, Len(cHistDir) - 1)
+    EndDo
+    If !ExistDir(cHistDir)
+        MakeDir(cHistDir)
+    EndIf
+
+    aArqs := {::cArqProducao, ::cArqOperacao, ::cArqMatPrima}
+
+    For nI := 1 To Len(aArqs)
+        If Empty(aArqs[nI]) .Or. !File(aArqs[nI])
+            Loop
+        EndIf
+        nPos  := Max(RAt("\", aArqs[nI]), RAt("/", aArqs[nI]))
+        cNome := IIf(nPos > 0, SubStr(aArqs[nI], nPos + 1), aArqs[nI])
+        cDest := PATH_MOVHIST + AllTrim(::cLote) + "_" + cNome
+
+        __CopyFile(aArqs[nI], cDest)
+        If File(cDest)
+            FErase(aArqs[nI])
+        EndIf
+    Next nI
+
+Return Nil

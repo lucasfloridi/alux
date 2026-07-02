@@ -1,0 +1,473 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#INCLUDE "Fileio.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.SelecaoArquivos
+
+/*/{Protheus.doc} SelecaoArquivos
+Tela generica de gerenciamento de arquivos (CSV) no servidor, no mesmo
+padrao do gerenciador de imagens ZLC. Os arquivos ficam numa pasta do
+servidor; ao abrir, a tela varre a pasta e mostra quais ja existem.
+
+Acoes por linha:
+  - Enviar / Alterar : envia um arquivo do PC do operador
+  - Ver arquivo      : baixa do servidor para o PC (CpyS2T) e abre (ShellExecute)
+  - Excluir          : apaga o arquivo do servidor (FErase)
+  - Importar         : (opcional) valida que todos existem, fecha e retorna os
+                       caminhos no servidor (usado pela PCPI001)
+
+E reutilizavel:
+  - PCPI001 (movimento): pasta PATH_MOV, sem handler (copia simples), com Importar.
+  - PCPI002 (auxiliares): pasta PATH_AUX, handler que chama AtualizadorAuxiliares
+    (valida + backup + sobrescreve), sem Importar (atualiza na hora).
+
+Layout responsivo com FWLayer: grid (72%) + acoes (28%).
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@version 12.1.2410
+/*/
+Class SelecaoArquivos
+
+    Public Data oDlg       as object
+    Public Data oBrw       as object
+    Public Data aArquivos  as array     // { cChave, cDesc, cFiltro, cNome, cStatus, cSrv }
+    Public Data lConfirmou as logical
+    Public Data cPasta     as character
+    Public Data bUpload    as codeblock
+    Public Data lImport    as logical
+    Public Data cTitulo    as character
+
+    Public Method New(aDefs, cPasta, bUpload, lImport, cTitulo) Constructor
+    Public Method Selecionar()
+    Public Method AtuStatus()
+    Public Method GarantePasta()
+    Public Method EnviarArq()
+    Public Method VerArq()
+    Public Method ExclArq()
+    Public Method Confirmar()
+
+EndClass
+
+/*/{Protheus.doc} SelecaoArquivos:New
+Construtor. Monta a lista de arquivos e calcula o status (existe na pasta?).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param aDefs, Array, Definicoes { cChave, cDesc, cFiltro, cNome } (opcional)
+@param cPasta, Character, Pasta no servidor (default PATH_MOV)
+@param bUpload, Codeblock, Handler de envio {|cSrc,cChave| lOk} (opcional)
+@param lImport, Logical, .T. mostra botao Importar e retorna caminhos (default .T.)
+@param cTitulo, Character, Titulo do dialogo (opcional)
+@return Self
+/*/
+Method New(aDefs, cPasta, bUpload, lImport, cTitulo) Class SelecaoArquivos
+Local nI := 0 as numeric
+
+    Default aDefs   := {}
+    Default cPasta  := PATH_MOV
+    Default lImport := .T.
+    Default cTitulo := "PCPI001 - Arquivos de Movimento (servidor)"
+
+    ::oDlg       := Nil
+    ::oBrw       := Nil
+    ::lConfirmou := .F.
+    ::cPasta     := cPasta
+    ::bUpload    := bUpload
+    ::lImport    := lImport
+    ::cTitulo    := cTitulo
+    ::aArquivos  := {}
+
+    If Empty(aDefs)
+        aDefs := { ;
+            {"PROD" , "1. Producao (t_producao)"          , "Arquivos CSV (*.csv)|*.csv|Todos (*.*)|*.*", ARQ_PRODUCAO}, ;
+            {"OPER" , "2. Operacao (t_operacao)"          , "Arquivos CSV (*.csv)|*.csv|Todos (*.*)|*.*", ARQ_OPERACAO}, ;
+            {"MATP" , "3. Materia-prima (t_materia_primas)", "Arquivos CSV (*.csv)|*.csv|Todos (*.*)|*.*", ARQ_MATPRIMA} }
+    EndIf
+
+    For nI := 1 To Len(aDefs)
+        aAdd(::aArquivos, {aDefs[nI][1], aDefs[nI][2], aDefs[nI][3], aDefs[nI][4], "Nao enviado", ::cPasta + aDefs[nI][4]})
+    Next nI
+
+    ::AtuStatus()
+
+Return Self
+
+/*/{Protheus.doc} SelecaoArquivos:AtuStatus
+Recalcula o status de cada arquivo (existe na pasta do servidor?) e atualiza
+o grid quando ja construido.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Nil
+/*/
+Method AtuStatus() Class SelecaoArquivos
+Local nI := 0 as numeric
+
+    For nI := 1 To Len(::aArquivos)
+        If File(::aArquivos[nI][6])
+            ::aArquivos[nI][5] := "OK - enviado"
+        Else
+            ::aArquivos[nI][5] := "Nao enviado"
+        EndIf
+    Next nI
+
+    If ::oBrw != Nil
+        ::oBrw:Refresh()
+    EndIf
+
+Return Nil
+
+/*/{Protheus.doc} SelecaoArquivos:GarantePasta
+Garante que a pasta de destino (e os niveis pais) existam no servidor.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Nil
+/*/
+Method GarantePasta() Class SelecaoArquivos
+Local cClean := "" as character
+Local cAcum  := "" as character
+Local cSeg   := "" as character
+Local cChar  := "" as character
+Local nI     := 0  as numeric
+Local nLen   := 0  as numeric
+
+    // Cria a arvore nivel a nivel (MakeDir nao cria intermediarios e nao
+    // aceita barra final).
+    cClean := StrTran(AllTrim(cValToChar(::cPasta)), "/", "\")
+    Do While Len(cClean) > 0 .And. Right(cClean, 1) == "\"
+        cClean := Left(cClean, Len(cClean) - 1)
+    EndDo
+    If Empty(cClean)
+        Return Nil
+    EndIf
+
+    nLen := Len(cClean)
+    For nI := 1 To nLen
+        cChar := SubStr(cClean, nI, 1)
+        If cChar == "\"
+            If !Empty(cSeg)
+                cAcum += "\" + cSeg
+                If !ExistDir(cAcum)
+                    MakeDir(cAcum)
+                EndIf
+                cSeg := ""
+            EndIf
+        Else
+            cSeg += cChar
+        EndIf
+    Next nI
+
+    If !Empty(cSeg)
+        cAcum += "\" + cSeg
+        If !ExistDir(cAcum)
+            MakeDir(cAcum)
+        EndIf
+    EndIf
+
+Return Nil
+
+/*/{Protheus.doc} SelecaoArquivos:Selecionar
+Abre o dialogo de gerenciamento. Com lImport=.T., retorna os caminhos (no
+servidor) quando o operador confirma; senao retorna {}.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Array, Caminhos no servidor ou {}
+/*/
+Method Selecionar() Class SelecaoArquivos
+Local oSelf    := Self as object
+Local oLayer   := Nil  as object
+Local oPnlGrd  := Nil  as object
+Local oPnlAcao := Nil  as object
+Local oBrw     := Nil  as object
+Local aHeaders := {}   as array
+Local aRet     := {}   as array
+Local nBtnW    := 0    as numeric
+Local nBtnX    := 0    as numeric
+Local nBtnH    := 18   as numeric
+Local nGap     := 8    as numeric
+Local nStep    := 0    as numeric
+Local nQtd     := 0    as numeric
+Local nAltPnl  := 0    as numeric
+Local nTopo    := 0    as numeric
+Local nYEnv    := 0    as numeric
+Local nYVer    := 0    as numeric
+Local nYExc    := 0    as numeric
+Local nYImp    := 0    as numeric
+Local nYCanc   := 0    as numeric
+Local nI       := 0    as numeric
+Local aSize    := MsAdvSize(.F.) as array
+Local nW       := aSize[5] * 0.65 as numeric
+Local nH       := aSize[6] * 0.55 as numeric
+Local nY0      := aSize[7] * 0.55 as numeric
+
+    ::lConfirmou := .F.
+
+    // ---- Dialog responsivo ----
+    DEFINE MSDIALOG ::oDlg TITLE ::cTitulo FROM nY0, 0 TO nH, nW PIXEL
+
+    // ---- FWLayer: grid (72%) + acoes (28%) ----
+    oLayer := FWLayer():New()
+    oLayer:Init(::oDlg, .F., .T.)
+
+    oLayer:AddLine("LINE1", 100, .F.)
+    oLayer:AddCollumn("BCOL_GRID", 72, .T., "LINE1")
+    oLayer:AddCollumn("BCOL_ACAO", 28, .T., "LINE1")
+    oLayer:AddWindow("BCOL_GRID", "PGRD" , "Arquivos na pasta do servidor", 100, .F., , , "LINE1")
+    oLayer:AddWindow("BCOL_ACAO", "PACAO", "Acoes"                        , 100, .F., , , "LINE1")
+
+    oPnlGrd  := oLayer:GetWinPanel("BCOL_GRID", "PGRD" , "LINE1")
+    oPnlAcao := oLayer:GetWinPanel("BCOL_ACAO", "PACAO", "LINE1")
+
+    // ---- Botoes: largura e posicoes VERTICAIS a partir do tamanho REAL do
+    //      painel (NCLIENTWIDTH/HEIGHT em PIXEL). O /2 anterior dimensionava
+    //      tudo pela METADE, deixando a tela com espaco vazio. ----
+    nBtnW   := (oPnlAcao:NCLIENTWIDTH/2) - 12
+    nBtnX   := 6
+    nQtd    := IIf(::lImport, 5, 4)              // Enviar/Ver/Excluir [+Importar] +Cancelar
+    nAltPnl := (oPnlAcao:NCLIENTHEIGHT/2 )           // altura util do painel (PIXEL real)
+    // Ajuste dinamico: 1o reduz o espacamento; se ainda nao couber, reduz a
+    // ALTURA do botao (min 11px) p/ caber todos sem cortar (ex.: 800x600).
+    If nQtd * nBtnH + (nQtd - 1) * nGap > nAltPnl - 12
+        nGap := Max(2, Int((nAltPnl - 12 - nQtd * nBtnH) / Max(1, nQtd - 1)))
+        If nQtd * nBtnH + (nQtd - 1) * nGap > nAltPnl - 12
+            nBtnH := Max(11, Int((nAltPnl - 12 - (nQtd - 1) * nGap) / nQtd))
+        EndIf
+    EndIf
+    nStep := nBtnH + nGap
+
+    // Centraliza a pilha na vertical (topo minimo de 6).
+    nTopo  := Max(6, Int((nAltPnl - (nQtd * nBtnH + (nQtd - 1) * nGap)) / 2))
+    nYEnv  := nTopo
+    nYVer  := nTopo + nStep
+    nYExc  := nTopo + 2 * nStep
+    nYImp  := nTopo + 3 * nStep
+    nYCanc := nTopo + (nQtd - 1) * nStep         // sempre o ultimo da pilha
+
+    // ---- Grid de arquivos ----
+    aHeaders := {"Arquivo", "Status"}
+
+    oBrw := TCBrowse():New( ;
+        000, 000, oPnlGrd:NCLIENTWIDTH, oPnlGrd:NCLIENTHEIGHT, ;
+        Nil, aHeaders, Nil, ;
+        oPnlGrd, ;
+        Nil, Nil, Nil, Nil, Nil, ;
+        Nil, Nil, Nil, Nil, Nil, ;
+        Nil, Nil, Nil, .T. )
+    oBrw:Align := CONTROL_ALIGN_ALLCLIENT   // preenche todo o painel (padrao FWLayer)
+
+    ::oBrw := oBrw
+    oBrw:SetArray(::aArquivos)
+    oBrw:bLine := {|| { oSelf:aArquivos[oBrw:nAt][2], ;
+                        oSelf:aArquivos[oBrw:nAt][5] } }
+    oBrw:bLDblClick := {|| oSelf:VerArq() }
+
+    ::AtuStatus()
+
+    // ---- Botoes de acao (Y dinamico - ver calculo acima) ----
+    @ nYEnv, nBtnX BUTTON "Enviar / Alterar" SIZE nBtnW, nBtnH PIXEL OF oPnlAcao ;
+        ACTION (oSelf:EnviarArq())
+
+    @ nYVer, nBtnX BUTTON "Ver arquivo" SIZE nBtnW, nBtnH PIXEL OF oPnlAcao ;
+        ACTION (oSelf:VerArq())
+
+    @ nYExc, nBtnX BUTTON "Excluir" SIZE nBtnW, nBtnH PIXEL OF oPnlAcao ;
+        ACTION (oSelf:ExclArq())
+
+    If ::lImport
+        @ nYImp, nBtnX BUTTON "Importar" SIZE nBtnW, nBtnH PIXEL OF oPnlAcao ;
+            ACTION (oSelf:Confirmar())
+    EndIf
+
+    @ nYCanc, nBtnX BUTTON IIf(::lImport, "Cancelar", "Fechar") SIZE nBtnW, nBtnH PIXEL OF oPnlAcao ;
+        ACTION (oSelf:oDlg:End())
+
+    ACTIVATE MSDIALOG ::oDlg CENTERED
+
+    FreeObj(oLayer)
+
+    If ::lImport .And. ::lConfirmou
+        For nI := 1 To Len(::aArquivos)
+            aAdd(aRet, ::aArquivos[nI][6])
+        Next nI
+    EndIf
+
+Return aRet
+
+/*/{Protheus.doc} SelecaoArquivos:EnviarArq
+Envia/altera o arquivo da linha selecionada. Se houver handler externo
+(bUpload), delega a ele (ex.: validacao + backup dos auxiliares); senao
+faz copia simples para a pasta com nome canonico.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Logical, .T. se enviou
+/*/
+Method EnviarArq() Class SelecaoArquivos
+Local nSel  := 0   as numeric
+Local cSrc  := ""  as character
+Local cNome := ""  as character
+Local cOrig := ""  as character
+Local lOk   := .F. as logical
+Local nPos  := 0   as numeric
+
+    nSel := ::oBrw:nAt
+    If nSel <= 0 .Or. nSel > Len(::aArquivos)
+        Return .F.
+    EndIf
+
+    cNome := ::aArquivos[nSel][4]
+
+    // File dialog no CLIENTE (nao usar File() aqui: o arquivo esta no PC)
+    cSrc := cGetFile(::aArquivos[nSel][3], "Enviar arquivo: " + ::aArquivos[nSel][2], ;
+                     1, "", .T., GETF_LOCALHARD + GETF_NETWORKDRIVE, .F.)
+
+    If Empty(AllTrim(cSrc))
+        Return .F.
+    EndIf
+
+    If ValType(::bUpload) == "B"
+        // Handler externo: valida/sobe/sobrescreve (ex.: AtualizadorAuxiliares)
+        lOk := Eval(::bUpload, cSrc, ::aArquivos[nSel][1])
+    Else
+        // Comportamento padrao: copia para a pasta e renomeia para o canonico
+        ::GarantePasta()
+        If File(::aArquivos[nSel][6])
+            FErase(::aArquivos[nSel][6])
+        EndIf
+        If !CpyT2S(cSrc, ::cPasta, .F., .F.)
+            FWAlertError("Falha ao enviar o arquivo para o servidor.", "Enviar arquivo")
+            Return .F.
+        EndIf
+        nPos  := Max(RAt("\", cSrc), RAt("/", cSrc))
+        cOrig := IIf(nPos > 0, SubStr(cSrc, nPos + 1), cSrc)
+        If Lower(AllTrim(cOrig)) != Lower(cNome)
+            FRename(::cPasta + cOrig, ::aArquivos[nSel][6])
+        EndIf
+        lOk := .T.
+    EndIf
+
+    If lOk
+        ::AtuStatus()
+    EndIf
+
+Return lOk
+
+/*/{Protheus.doc} SelecaoArquivos:VerArq
+Baixa o arquivo do servidor para o PC do operador (CpyS2T) e abre com o
+programa padrao do cliente (ShellExecute). Pergunta onde salvar.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Logical, .T. se baixou e abriu
+/*/
+Method VerArq() Class SelecaoArquivos
+Local nSel     := 0  as numeric
+Local cSrv     := "" as character
+Local cNome    := "" as character
+Local cDest    := "" as character
+Local cDestDir := "" as character
+Local nPos     := 0  as numeric
+
+    nSel := ::oBrw:nAt
+    If nSel <= 0 .Or. nSel > Len(::aArquivos)
+        Return .F.
+    EndIf
+
+    cSrv  := ::aArquivos[nSel][6]
+    cNome := ::aArquivos[nSel][4]
+
+    If !File(cSrv)
+        FWAlertWarning("Arquivo ainda nao foi enviado para o servidor.", "Ver arquivo")
+        Return .F.
+    EndIf
+
+    // Pergunta onde salvar no CLIENTE (download)
+    cDest := cGetFile(::aArquivos[nSel][3], "Salvar e abrir arquivo em...", ;
+                     0, "", .T., GETF_LOCALHARD + GETF_NETWORKDRIVE, .T.)
+
+    If Empty(AllTrim(cDest))
+        Return .F.
+    EndIf
+
+    nPos     := Max(RAt("\", cDest), RAt("/", cDest))
+    cDestDir := IIf(nPos > 0, Left(cDest, nPos), cDest)
+
+    // Copia do SERVIDOR para o CLIENTE
+    If !CpyS2T(cSrv, cDestDir)
+        FWAlertError("Falha ao baixar o arquivo para a maquina.", "Ver arquivo")
+        Return .F.
+    EndIf
+
+    // Abre no cliente com o programa padrao (Excel / Bloco de Notas)
+    ShellExecute("Open", cNome, "", cDestDir, 1)
+
+Return .T.
+
+/*/{Protheus.doc} SelecaoArquivos:ExclArq
+Exclui o arquivo selecionado da pasta do servidor (com confirmacao).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Logical, .T. se processou
+/*/
+Method ExclArq() Class SelecaoArquivos
+Local nSel := 0 as numeric
+
+    nSel := ::oBrw:nAt
+    If nSel <= 0 .Or. nSel > Len(::aArquivos)
+        Return .F.
+    EndIf
+
+    If !File(::aArquivos[nSel][6])
+        FWAlertWarning("Nao ha arquivo enviado para excluir.", "Excluir arquivo")
+        Return .F.
+    EndIf
+
+    If FWAlertNoYes("Excluir o arquivo '" + ::aArquivos[nSel][4] + "' do servidor?", "Excluir arquivo")
+        FErase(::aArquivos[nSel][6])
+        ::AtuStatus()
+    EndIf
+
+Return .T.
+
+/*/{Protheus.doc} SelecaoArquivos:Confirmar
+Valida que todos os arquivos existem na pasta do servidor. Em caso positivo
+marca lConfirmou e fecha; caso contrario lista os pendentes.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Logical, .T. se confirmou e fechou
+/*/
+Method Confirmar() Class SelecaoArquivos
+Local nI     := 0  as numeric
+Local cFalta := "" as character
+
+    For nI := 1 To Len(::aArquivos)
+        If !File(::aArquivos[nI][6])
+            cFalta += "- " + ::aArquivos[nI][2] + CRLF
+        EndIf
+    Next nI
+
+    If !Empty(cFalta)
+        FWAlertWarning("Envie todos os arquivos antes de importar:" + CRLF + cFalta, "Importar")
+        Return .F.
+    EndIf
+
+    ::lConfirmou := .T.
+    ::oDlg:End()
+
+Return .T.

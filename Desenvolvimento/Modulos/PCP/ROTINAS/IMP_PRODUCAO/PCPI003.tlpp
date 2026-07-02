@@ -1,0 +1,296 @@
+#include "totvs.ch"
+#include "FWMVCDef.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.PCPI003
+
+using namespace Alux.PCP.ConstrutorOP
+using namespace Alux.PCP.ReprocessadorApontamento
+using namespace Alux.PCP.RepositorioStaging
+
+// Variaveis estaticas (padrao browse MVC)
+Static cTitulo   := "Reprocessamento de Apontamentos (Z01) - PCP" As Character
+Static cAliasMVC := "Z01" As Character
+
+// Cores da legenda por status
+#define COR_OK      "BR_VERDE"      // S = processado com sucesso
+#define COR_WARN    "BR_LARANJA"    // W = processado com aviso
+#define COR_ERRO    "BR_VERMELHO"   // E = erro
+#define COR_REPROC  "BR_AMARELO"    // R = reprocessar
+#define COR_PEND    "BR_AZUL"       // P = pendente (nao processado)
+#define COR_IGN     "BR_CINZA"      // I = ignorado
+
+/*/{Protheus.doc} PCPI003
+Browse (FWMBrowse MVC) de reprocessamento das OPs da Z01 com status
+Erro (E), Reprocessar (R) ou Pendente (P - staging que nao concluiu a
+Fase 2). Reprocessa o registro POSICIONADO ou TODOS, a partir dos dados
+armazenados (JSON na Z01), sem reler arquivos.
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   29/05/2026
+@version 12.1.2410
+@return  Variant, Retorna sempre nulo
+/*/
+User Function PCPI003() As Variant
+	Local aArea          := FWGetArea() as Array
+	Local oBrowse        := Nil         as Object
+
+	Private aRotina      := {}          as Array
+    Private bReprocPos   := Nil         as CodeBlock
+    Private bReprocTodos := Nil         as CodeBlock
+    Private bExcluiOP    := Nil         as CodeBlock
+
+	// BUG-039: cValToChar garante string mesmo se MV vier com tipo inesperado
+	If AllTrim(Upper(cValToChar(SuperGetMv("AL_PCPIMOP", .F., "N")))) != "S"
+		FWAlertWarning("Rotina desabilitada. Parametro AL_PCPIMOP deve estar como 'S'.", "PCPI003")
+		FWRestArea(aArea)
+		Return Nil
+	EndIf
+
+	SetFunName("PCPI003")
+	aRotina := Alux.PCP.PCPI003.U_MenuDef()
+
+	oBrowse := FWMBrowse():New()
+	oBrowse:SetAlias(cAliasMVC)
+	oBrowse:SetDescription(cTitulo)
+	oBrowse:SetMenuDef("PCPI003")
+
+	// Filtro: status Erro / Reprocessar / Pendente
+	// oBrowse:SetFilterDefault("Z01_STATUS $ '" + STATUS_ERRO + STATUS_REPROC + STATUS_PEND + "'")
+
+	// Legenda de cores por status (todos os status que a rotina gera)
+	oBrowse:AddLegend("Z01_STATUS == '" + STATUS_OK + "'"    , COR_OK    , "Processado com sucesso")
+	oBrowse:AddLegend("Z01_STATUS == '" + STATUS_WARN + "'"  , COR_WARN  , "Processado com aviso")
+	oBrowse:AddLegend("Z01_STATUS == '" + STATUS_ERRO + "'"  , COR_ERRO  , "Erro")
+	oBrowse:AddLegend("Z01_STATUS == '" + STATUS_REPROC + "'", COR_REPROC, "Reprocessar")
+	oBrowse:AddLegend("Z01_STATUS == '" + STATUS_PEND + "'"  , COR_PEND  , "Pendente (nao processado)")
+	oBrowse:AddLegend("Z01_STATUS == '" + STATUS_IGN + "'"   , COR_IGN   , "Ignorado")
+
+    // Botoes de acao (na ordem desejada). nType = 1 (mesmo tipo) para ficarem
+	// uniformes e em sequencia, logo apos Alterar/Visualizar do MenuDef.
+	// oBrowse:AddButton("Reprocessar OP",        {|| ReprPos(oBrowse)}, , 1)
+	// oBrowse:AddButton("Reprocessar Todos",     {|| ReprTod(oBrowse)}, , 1)
+	// oBrowse:AddButton("Excluir p/ Reimportar", {|| ExclOP(oBrowse)} , , 1)
+
+	oBrowse:Activate()
+
+	FWRestArea(aArea)
+
+Return Nil
+
+/*/{Protheus.doc} MenuDef
+Menu do browse. Apenas Visualizar (os registros Z01 sao gerados pelo
+sistema; nao ha inclusao/alteracao/exclusao manual). O reprocessamento
+fica nos botoes da barra.
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   02/06/2026
+@return  Array, rotinas do menu
+/*/
+User Function MenuDef() As Array
+	Local aRotina := {} As Array
+
+    bReprocPos   := {|| ReprPos(/*oBrowse*/)}
+    bReprocTodos := {|| ReprTod(/*oBrowse*/)}
+    bExcluiOP    := {|| ExclOP(/*oBrowse*/)}
+
+	// Ordem dos botoes: 1-Alterar, 2-Visualizar (MenuDef) + 3-Reprocessar OP,
+	// 4-Reprocessar Todos, 5-Excluir p/ Reimportar (AddButton, na PCPI003).
+	ADD OPTION aRotina TITLE "Alterar"               ACTION "VIEWDEF.Alux.PCP.PCPI003.PCPI003" OPERATION MODEL_OPERATION_UPDATE ACCESS 0
+	ADD OPTION aRotina TITLE "Visualizar"            ACTION "VIEWDEF.Alux.PCP.PCPI003.PCPI003" OPERATION MODEL_OPERATION_VIEW   ACCESS 0
+	ADD OPTION aRotina TITLE "Reprocessar OP"        ACTION "Eval(bReprocPos)"                 OPERATION MODEL_OPERATION_UPDATE ACCESS 0
+	ADD OPTION aRotina TITLE "Reprocessar Todos"     ACTION "Eval(bReprocTodos)"               OPERATION MODEL_OPERATION_UPDATE ACCESS 0
+	ADD OPTION aRotina TITLE "Excluir p/ Reimportar" ACTION "Eval(bExcluiOP)"                  OPERATION MODEL_OPERATION_UPDATE ACCESS 0
+
+Return aRotina
+
+/*/{Protheus.doc} ModelDef
+Modelo de dados (somente leitura/visualizacao) da tabela Z01.
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   02/06/2026
+@return  Object, modelo MVC
+/*/
+User Function ModelDef() As Object
+	Local oStruct := FWFormStruct(1, cAliasMVC) As Object
+	Local oModel  := Nil As Object
+
+	oModel := MPFormModel():New("PCPI003M")
+	oModel:AddFields("Z01MASTER", /*cOwner*/, oStruct)
+	oModel:SetPrimaryKey({"Z01_FILIAL", "Z01_LOTE", "Z01_OP", "Z01_OPPROT"})
+	oModel:SetDescription("Reprocessamento - " + cTitulo)
+	oModel:GetModel("Z01MASTER"):SetDescription("Registro de staging Z01")
+
+Return oModel
+
+/*/{Protheus.doc} ViewDef
+Visualizacao (somente leitura) do registro Z01.
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   02/06/2026
+@return  Object, view MVC
+/*/
+User Function ViewDef() As Object
+	Local oModel  := FWLoadModel("Alux.PCP.PCPI003.PCPI003") As Object
+	Local oStruct := FWFormStruct(2, cAliasMVC) As Object
+	Local oView   := Nil As Object
+
+	oView := FWFormView():New()
+	oView:SetModel(oModel)
+	oView:AddField("VIEW_Z01", oStruct, "Z01MASTER")
+	oView:CreateHorizontalBox("TELA", 100)
+	oView:SetOwnerView("VIEW_Z01", "TELA")
+	oView:EnableTitleView("VIEW_Z01", cTitulo)
+	oView:EnableControlBar(.T.)
+	oView:SetCloseOnOk({|| .T.})
+
+Return oView
+
+/*/{Protheus.doc} ReprPos
+Reprocessa a OP do registro Z01 POSICIONADO no browse (pelo Recno).
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   02/06/2026
+@param   oBrowse, Object, Browse para refresh apos o reprocessamento
+@return  Variant, Retorna sempre nulo
+/*/
+Static Function ReprPos(/*oBrowse*/) As Variant
+	Local oRepr  := Nil As Object
+	Local nRecno := 0 As Numeric
+
+	nRecno := Z01->(Recno())
+	If Empty(nRecno) .Or. nRecno <= 0
+		FWAlertWarning("Posicione em uma OP da lista para reprocessar.", "PCPI003")
+		Return Nil
+	EndIf
+
+	If !(Z01->Z01_STATUS $ (STATUS_ERRO + STATUS_REPROC + STATUS_PEND))
+		FWAlertWarning("Registro nao e reprocessavel (status " + AllTrim(Z01->Z01_STATUS) + ").", "PCPI003")
+		Return Nil
+	EndIf
+
+	If !FWAlertYesNo("Reprocessar a OP " + AllTrim(Z01->Z01_OPPROT) + ;
+			" (lote " + AllTrim(Z01->Z01_LOTE) + ")?", "PCPI003")
+		Return Nil
+	EndIf
+
+	oRepr := ReprocessadorApontamento():New()
+	oRepr:ReprocessarSelecao({nRecno})
+
+	// If oBrowse != Nil
+	// 	oBrowse:Refresh(.T.)
+	// EndIf
+
+Return Nil
+
+/*/{Protheus.doc} ReprTod
+Reprocessa TODOS os registros Z01 com status E/R/P.
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   02/06/2026
+@param   oBrowse, Object, Browse para refresh apos o reprocessamento
+@return  Variant, Retorna sempre nulo
+/*/
+Static Function ReprTod(/*oBrowse*/) As Variant
+	Local oRepr := Nil As Object
+
+	If !FWAlertYesNo("Reprocessar TODOS os registros com status Erro/Reprocessar/Pendente?", "PCPI003")
+		Return Nil
+	EndIf
+
+	oRepr := ReprocessadorApontamento():New()
+	oRepr:ReprocessarTodos()
+
+	// If oBrowse != Nil
+	// 	oBrowse:Refresh(.T.)
+	// EndIf
+
+Return Nil
+
+/*/{Protheus.doc} ExclOP
+Estorna/exclui a OP do registro Z01 posicionado (MATA650 exclusao, que
+cascateia os empenhos SD4) E REMOVE o registro da Z01, liberando a
+REIMPORTACAO COMPLETA do arquivo com os dados corrigidos (sem o registro
+na Z01, a regra "nao repetir OP" deixa importar de novo). Bloqueia apenas a
+OP finalizada (Sucesso) que AINDA EXISTE no sistema; se a OP nao existe mais
+(estornada/nunca criada), remove o registro Z01 INDEPENDENTE do status.
+
+@type    Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   09/06/2026
+@param   oBrowse, Object, Browse para refresh apos a exclusao
+@return  Variant, Retorna sempre nulo
+/*/
+Static Function ExclOP(/*oBrowse*/) As Variant
+	Local oCon    := Nil As Object
+	Local oStg    := Nil As Object
+	Local cOpDel  := ""  As Character
+	Local cStat   := ""  As Character
+	Local nRecno  := 0   As Numeric
+	Local lExiste := .F. As Logical
+
+	If Z01->(Recno()) <= 0
+		FWAlertWarning("Posicione em uma OP da lista.", "PCPI003")
+		Return Nil
+	EndIf
+
+	cStat  := AllTrim(Z01->Z01_STATUS)
+	cOpDel := AllTrim(Z01->Z01_OPPROT)
+	nRecno := Z01->(Recno())
+
+	// A OP ainda EXISTE no Protheus (SC2)? Decide a regra de exclusao.
+	oCon    := ConstrutorOP():New()
+	lExiste := !Empty(cOpDel) .And. oCon:Existe(cOpDel)
+
+	// So bloqueia OP finalizada (Sucesso) se ela AINDA EXISTE no sistema. Se a OP
+	// nao existe mais (estornada/nunca criada), permite remover o registro orfao
+	// da Z01 INDEPENDENTE do status.
+	If cStat == STATUS_OK .And. lExiste
+		FWAlertWarning("OP " + cOpDel + " finalizada (Sucesso) e ATIVA no sistema - nao pode ser excluida por aqui.", "PCPI003")
+		Return Nil
+	EndIf
+
+	If lExiste
+		// OP existe: confirma, estorna/exclui no Protheus (MATA650 cascateia os
+		// empenhos) e so entao remove a Z01. Em falha, mantem a Z01.
+		If !FWAlertNoYes("Estornar/excluir a OP " + cOpDel + " e REMOVER o registro da Z01?" + CRLF + ;
+				"Isso libera a reimportacao do arquivo com os dados corrigidos.", "PCPI003")
+			Return Nil
+		EndIf
+		If !oCon:ExcluirOP(cOpDel)
+			FWAlertError("Falha ao excluir a OP " + cOpDel + ":" + CRLF + oCon:GetUltimoErro() + ;
+				CRLF + "O registro da Z01 NAO foi removido.", "PCPI003")
+			Return Nil
+		EndIf
+	Else
+		// OP nao existe no sistema: apenas remove o registro (orfao) da Z01,
+		// independente do status.
+		If !FWAlertNoYes("A OP " + IIf(Empty(cOpDel), "(registro sem OP)", cOpDel) + ;
+				" NAO existe no sistema. Remover o registro da Z01 (status " + cStat + ")?" + CRLF + ;
+				"Isso libera a reimportacao do arquivo.", "PCPI003")
+			Return Nil
+		EndIf
+	EndIf
+
+	// Remove o registro da Z01 (libera a reimportacao completa do arquivo).
+	oStg := RepositorioStaging():New("")
+	If oStg:RemoverRecno(nRecno)
+		FWAlertSuccess("Registro removido da Z01" + IIf(Empty(cOpDel), "", " (OP " + cOpDel + ")") + "." + CRLF + ;
+			"Pode reimportar o arquivo com os dados corrigidos.", "PCPI003")
+	Else
+		FWAlertWarning("FALHA ao remover o registro da Z01 (recno " + cValToChar(nRecno) + ").", "PCPI003")
+	EndIf
+
+	// If oBrowse != Nil
+	// 	oBrowse:Refresh(.T.)
+	// EndIf
+
+Return Nil

@@ -1,0 +1,88 @@
+#include "totvs.ch"
+#include "protheus.ch"
+#include "tlpp-core.th"
+#include "PCPI001.th"
+
+// Ponto de Entrada do MATA681 (apontamento de producao Mod2). Sem namespace de
+// proposito: o ExecBlock("MT681INC") do padrao resolve a User Function GLOBAL
+// U_MT681INC.
+
+/*/{Protheus.doc} MT681INC
+Ponto de Entrada do MATA681, disparado APOS a inclusao do apontamento (e apos
+o encerramento, quando houver). Quando uma OP que esta na tabela Z01 (importada
+pelo PCPI001) e finalizada/ENCERRADA manualmente pelas rotinas padrao do
+sistema - tipicamente o apontamento da operacao TOTAL apos a entrada do saldo
+que faltava - este PE atualiza o status da Z01 para "S" (verde), sinalizando
+que NAO ha mais pendencias para aquela ordem.
+
+NAO interfere em OPs que nao estao na Z01 (o seek nao acha e o PE sai). So age
+quando a OP esta ENCERRADA (C2_DATRF preenchido = totalmente processada).
+
+@type    User Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   16/06/2026
+@version 12.1.2410
+@return  Nil
+/*/
+User Function MT681INC()
+	Local aArea   := GetArea() as array
+    Local cHabIMP := ""        as character
+	
+    cHabIMP := AllTrim(Upper(cValToChar(SuperGetMv("AL_PCPIMOP", .F., "N"))))
+	If cHabIMP != "S"
+		FWAlertWarning("Rotina desabilitada. Parametro AL_PCPIMOP deve estar como 'S'.", "PCPI001")
+		Return Nil
+    Else
+        fAtuOP()
+	EndIf	
+
+	RestArea(aArea)
+
+Return Nil
+
+static function fAtuOP() as variant
+
+    Local cOpFull := ""        as character
+	Local cOpProt := ""        as character
+	Local lEncer  := .F.       as logical
+
+    // SH6 esta posicionado no apontamento recem-incluido (H6_OP = OP completa).
+	cOpFull := AllTrim(SH6->H6_OP)
+	If Empty(cOpFull)
+		Return Nil
+	EndIf
+
+	// Numero da OP (C2_NUM) = parte inicial da OP completa (num + item + sequencia).
+	cOpProt := SubStr(cOpFull, 1, TAM_C2_NUM)
+
+	// So sinaliza verde quando a OP esta TOTALMENTE processada (encerrada).
+	SC2->(dbSetOrder(1))   // C2_FILIAL + C2_NUM + C2_ITEM + C2_SEQUEN
+	If SC2->(dbSeek(xFilial("SC2") + cOpFull))
+		lEncer := !Empty(SC2->C2_DATRF)
+	EndIf
+	If !lEncer
+		Return Nil
+	EndIf
+
+	// Atualiza para "S" (verde) o(s) registro(s) Z01 da OP que ainda nao estao em
+	// S. Usa o indice 4 (Z01_FILIAL + Z01_OPPROT).
+	dbSelectArea("Z01")
+	Z01->(dbSetOrder(4))
+	If Z01->(dbSeek(xFilial("Z01") + cOpProt))
+		While !Z01->(Eof()) .And. Z01->Z01_FILIAL == xFilial("Z01") .And. ;
+				AllTrim(Z01->Z01_OPPROT) == AllTrim(cOpProt)
+			If AllTrim(Z01->Z01_STATUS) != STATUS_OK
+				If RecLock("Z01", .F.)
+					Z01->Z01_STATUS := STATUS_OK
+					Z01->Z01_ETAPA  := ETAPA_APONT
+					Z01->Z01_MSG    := "OP finalizada/encerrada (apontamento padrao) - sem pendencias."
+					Z01->Z01_DTPROC := dDataBase
+					Z01->Z01_HRPROC := Time()
+					Z01->(MsUnlock())
+				EndIf
+			EndIf
+			Z01->(dbSkip())
+		EndDo
+	EndIf
+
+return (nil)

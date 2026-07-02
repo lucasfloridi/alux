@@ -1,0 +1,451 @@
+#include "totvs.ch"
+#include "protheus.ch"
+#include "topconn.ch"
+#include "tlpp-core.th"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ConstrutorApontamento
+
+/*/{Protheus.doc} ConstrutorApontamento
+Cria apontamento de producao (SH6 - Mod2) via MATA681 ExecAuto, UMA
+operacao por chamada (modelo novo t_operacao). A operacao e o recurso
+vem EXPLICITOS no arquivo (sem lookup na SG2). O consumo dos empenhos
+(AUTCONSUMO) entra apenas na operacao que reconsome a OP.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@version 12.1.2410
+/*/
+Class ConstrutorApontamento
+
+	Public Data cUltimoErro as character
+
+	Private Data oCacheLocal as object
+
+	Public Method New() Constructor
+	Public Method Apontar(oOperacao, cNumOp, cProdutoSB1, aConsumos, nQtdOP, aCoprodutos, dDtOP)
+	Public Method MontarSH6Base(cOpCompl, cProdutoSB1, cOrdSep, cOperac, cRecurso, dDataIni, cHoraIni, dDataFim, cHoraFim, nQtdProd, cPT)
+	Public Method MontarConsumo(aConsumos, cOpCompl)
+	Public Method MontarCoproduto(aCoprodutos, cOpCompl)
+	Public Method ExecutarMATA681(aSH6)
+	Public Method JaApontada(cOpCompl, cOperac)
+	Public Method GetLocal(cProduto)
+	Public Method GetSafe(oObj, cChave, xDefault)
+	Public Method GetUltimoErro()
+
+EndClass
+
+/*/{Protheus.doc} ConstrutorApontamento:New
+Construtor.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Self
+/*/
+Method New() Class ConstrutorApontamento
+
+	::cUltimoErro := ""
+	::oCacheLocal := JsonObject():New()
+
+Return Self
+
+/*/{Protheus.doc} ConstrutorApontamento:Apontar
+Aponta UMA operacao (Mod2) via MATA681. Usa operacao/recurso/qtd/datas
+da linha do t_operacao. Operacao e recurso sao zero-padded no tamanho
+do campo (H6_OPERAC / H6_RECURSO). Quando aConsumos vier preenchido,
+adiciona AUTCONSUMO (consumo dos empenhos via D3_TRT).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oOperacao, Object, Linha do t_operacao (cOperacao, cRecurso, nQtd, datas)
+@param cNumOp, Character, Numero da OP (C2_NUM)
+@param cProdutoSB1, Character, Codigo SB1 do produto (explicito)
+@param aConsumos, Array, Empenhos criados a consumir (do ConstrutorEmpenho)
+@param nQtdOP, Numeric, Quantidade total da OP
+@param aCoprodutos, Array, Co-produtos (negativos invertidos)
+@param dDtOP, Date, Data da OP (vira a data base de TODOS os movimentos do MATA681)
+@return Logical, .T. se apontou com sucesso
+/*/
+Method Apontar(oOperacao, cNumOp, cProdutoSB1, aConsumos, nQtdOP, aCoprodutos, dDtOP) Class ConstrutorApontamento
+	Local aSH6       := {} as array
+	Local lOk        := .F. as logical
+	Local cOpCompl   := "" as character
+	Local cOperac    := "" as character
+	Local cRecurso   := "" as character
+	Local cOrdSep    := "" as character
+	Local cPT        := "" as character
+	Local cHoraIni   := "" as character
+	Local cHoraFim   := "" as character
+	Local nQtd       := 0  as numeric
+	Local nMinIni    := 0  as numeric
+	Local nMinFim    := 0  as numeric
+	Local lTotal     := .F. as logical
+	Local dDataIni   := dDataBase as date
+	Local dDataFim   := dDataBase as date
+	Local dDtBaseAnt := dDataBase as date
+
+	Default nQtdOP := 0
+	Default aCoprodutos := {}
+	Default dDtOP := dDataBase
+	If ValType(dDtOP) != "D" .Or. Empty(dDtOP)
+		dDtOP := dDataBase
+	EndIf
+
+	::cUltimoErro := ""
+
+	If aConsumos == Nil
+		aConsumos := {}
+	EndIf
+	If aCoprodutos == Nil
+		aCoprodutos := {}
+	EndIf
+
+	cOpCompl := OP_COMPLETA(cNumOp)
+	cOrdSep  := AllTrim(cValToChar(::GetSafe(oOperacao, "cOrdSep", "")))
+
+	// Operacao COM quantidade (a que produz) -> apontamento TOTAL ("T").
+	// Operacao SEM quantidade (intermediaria)  -> PARCIAL ("P") - nao cai na
+	// regra MA250PERDA. No TOTAL, a qtd nao pode ser menor que a da OP -> usa
+	// o maior (qtd da operacao x qtd da OP).
+	nQtd   := ::GetSafe(oOperacao, "nQtd", 0)
+	lTotal := nQtd > 0
+	cPT    := IIf(lTotal, "T", "P")
+	If lTotal
+		nQtd := Max(nQtd, nQtdOP)
+	EndIf
+
+	// Operacao e recurso EXPLICITOS, zero-padded no tamanho do campo
+	cOperac  := StrZero(Val(AllTrim(cValToChar(::GetSafe(oOperacao, "cOperacao", "")))), TamSX3("H6_OPERAC")[1])
+	cRecurso := StrZero(Val(AllTrim(cValToChar(::GetSafe(oOperacao, "cRecurso", "")))), TamSX3("H6_RECURSO")[1])
+
+	If Empty(cOperac) .Or. Val(cOperac) == 0
+		::cUltimoErro := "Operacao invalida no apontamento (OP " + cNumOp + ")"
+		Return .F.
+	EndIf
+
+	// Idempotencia: se a operacao JA foi apontada (SH6 existe para OP+operacao),
+	// nao aponta de novo - evita duplicar no reprocesso e respeita apontamento
+	// ja feito manualmente. Retorna sucesso (a operacao ja esta lancada).
+	If ::JaApontada(cOpCompl, cOperac)
+		Return .T.
+	EndIf
+
+	// Data base = DATA DA OP (dia de inclusao da OP) ANTES do ExecAuto. TODOS os
+	// movimentos gerados pelo MATA681 (producao PR0, mao de obra RE1, consumo do
+	// backflush) herdam a data base. Sem isso a mao de obra pega Date() (hoje) e
+	// cai na A250VerReq (SD3 "RE" com data > producao) -> A250NOENC. Tambem serve
+	// de fallback das datas da operacao (nunca cair para hoje). Restaura no fim.
+	dDtBaseAnt := dDataBase
+	dDataBase  := dDtOP
+
+	// Datas/horas da operacao (explicitas da linha do t_operacao)
+	dDataIni := ::GetSafe(oOperacao, "dDataIni", dDataBase)
+	cHoraIni := AllTrim(cValToChar(::GetSafe(oOperacao, "cHoraIni", "")))
+	dDataFim := ::GetSafe(oOperacao, "dDataFim", dDataBase)
+	cHoraFim := AllTrim(cValToChar(::GetSafe(oOperacao, "cHoraFim", "")))
+	If ValType(dDataIni) != "D" .Or. Empty(dDataIni)
+		dDataIni := dDataBase
+	EndIf
+	If ValType(dDataFim) != "D" .Or. Empty(dDataFim)
+		dDataFim := dDataIni
+	EndIf
+
+	// Ajuste de virada de dia / hora invertida (A680HORA): com datas iguais, a
+	// hora final nao pode ser <= a inicial. Se a data fim < inicio, alinha ao
+	// inicio; se iguais e a hora fim <= inicio, soma 1 dia (operacao virou o dia,
+	// ex.: inicio 19:50 e fim 00:50 -> fim no dia seguinte).
+	nMinIni := Val(SubStr(cHoraIni, 1, 2)) * 60 + Val(SubStr(cHoraIni, 4, 2))
+	nMinFim := Val(SubStr(cHoraFim, 1, 2)) * 60 + Val(SubStr(cHoraFim, 4, 2))
+	If dDataFim < dDataIni
+		dDataFim := dDataIni
+	EndIf
+	If dDataFim == dDataIni .And. nMinFim <= nMinIni
+		dDataFim := dDataFim + 1
+	EndIf
+
+	aSH6 := ::MontarSH6Base(cOpCompl, cProdutoSB1, cOrdSep, cOperac, cRecurso, ;
+		dDataIni, cHoraIni, dDataFim, cHoraFim, nQtd, cPT)
+
+	// Consumo (positivos) e co-produto (negativos) - somente na operacao que
+	// reconsome a OP. Padrao MATI681: AUTCONSUMO + AUTCOPRODU separados.
+	If !USA_BACKFLUSH .And. Len(aConsumos) > 0
+		aAdd(aSH6, {"AUTCONSUMO", ::MontarConsumo(aConsumos, cOpCompl), Nil})
+	EndIf
+	If !USA_BACKFLUSH .And. Len(aCoprodutos) > 0
+		aAdd(aSH6, {"AUTCOPRODU", ::MontarCoproduto(aCoprodutos, cOpCompl), Nil})
+	EndIf
+
+	lOk := ::ExecutarMATA681(aSH6)
+
+	dDataBase := dDtBaseAnt
+
+Return lOk
+
+/*/{Protheus.doc} ConstrutorApontamento:MontarSH6Base
+Monta o cabecalho aSH6 do MATA681 para 1 operacao.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param cOpCompl, Character, OP completa (numero + item + sequencia)
+@param cProdutoSB1, Character, Codigo SB1 do produto
+@param cOrdSep, Character, Ordem de separacao (vai em H6_OBSERVA)
+@param cOperac, Character, Operacao do roteiro (zero-padded)
+@param cRecurso, Character, Recurso (zero-padded)
+@param dDataIni, Date, Data inicio
+@param cHoraIni, Character, Hora inicio
+@param dDataFim, Date, Data fim
+@param cHoraFim, Character, Hora fim
+@param nQtdProd, Numeric, Quantidade produzida na operacao
+@return Array, Array padrao MATA681
+/*/
+Method MontarSH6Base(cOpCompl, cProdutoSB1, cOrdSep, cOperac, cRecurso, dDataIni, cHoraIni, dDataFim, cHoraFim, nQtdProd, cPT) Class ConstrutorApontamento
+	Local aSH6   := {} as array
+	Local cLocal := "" as character
+
+	Default cPT := "T"
+
+	cLocal := ::GetLocal(cProdutoSB1)
+
+	// Garante tipo Date (default dDataBase) - evita type mismatch no ExecAuto
+	If ValType(dDataIni) != "D"
+		dDataIni := dDataBase
+	EndIf
+	If ValType(dDataFim) != "D"
+		dDataFim := dDataBase
+	EndIf
+
+	// Campos confirmados no padrao MATI681. H6_PT = "T" (apontamento TOTAL,
+	// sempre total no Mod2 - nunca parcial). H6_TIPO = "P" (producao).
+	aAdd(aSH6, {"H6_OP"      , cOpCompl     , Nil})
+	aAdd(aSH6, {"H6_PRODUTO" , cProdutoSB1  , Nil})
+	aAdd(aSH6, {"H6_OPERAC"  , cOperac      , Nil})
+	aAdd(aSH6, {"H6_RECURSO" , cRecurso     , Nil})
+	// aAdd(aSH6, {"H6_DTAPONT" , dDataIni     , Nil})
+	aAdd(aSH6, {"H6_DATAINI" , dDataIni     , Nil})
+	aAdd(aSH6, {"H6_HORAINI" , cHoraIni     , Nil})
+	aAdd(aSH6, {"H6_DATAFIN" , dDataFim     , Nil})
+	aAdd(aSH6, {"H6_HORAFIN" , cHoraFim     , Nil})
+	aAdd(aSH6, {"H6_PT"      , cPT          , Nil}) // T=total (op que produz) / P=parcial
+	aAdd(aSH6, {"H6_LOCAL"   , cLocal       , Nil})
+	aAdd(aSH6, {"H6_QTDPROD" , nQtdProd     , Nil})
+	// aAdd(aSH6, {"H6_TIPO"    , "P"          , Nil})
+	// aAdd(aSH6, {"AUTASKULT"  , USA_BACKFLUSH, Nil}) // backflush
+
+Return aSH6
+
+/*/{Protheus.doc} ConstrutorApontamento:MontarConsumo
+Monta o node AUTCONSUMO a partir dos empenhos criados pelo
+ConstrutorEmpenho. Cada item referencia o empenho pelo D3_TRT (=D4_TRT)
+com D3_QUANT POSITIVO. D3_TM = 999 (requisicao automatica reservada).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aConsumos, Array, Empenhos criados {cCod, cTrt, nQtd, cLocal, cOp}
+@param cOpCompl, Character, OP completa
+@return Array, Cabecalho AUTCONSUMO com AUTITEMS
+/*/
+Method MontarConsumo(aConsumos, cOpCompl) Class ConstrutorApontamento
+	Local aCabBaixa := {} as array
+	Local aItens    := {} as array
+	Local aItem     := {} as array
+	Local nI        := 0  as numeric
+	Local cCod      := "" as character
+	Local cTrt      := "" as character
+	Local nQtd      := 0  as numeric
+	Local cLocal    := "" as character
+
+	For nI := 1 To Len(aConsumos)
+		cCod   := aConsumos[nI][1]
+		cTrt   := aConsumos[nI][2]
+		nQtd   := aConsumos[nI][3]
+		cLocal := aConsumos[nI][4]
+
+		aItem := {}
+		aAdd(aItem, {"D3_COD"   , cCod    , Nil})
+		aAdd(aItem, {"D3_QUANT" , nQtd    , Nil}) // POSITIVO (consumo)
+		aAdd(aItem, {"D3_LOCAL" , cLocal  , Nil})
+		aAdd(aItem, {"D3_OP"    , cOpCompl, Nil})
+		aAdd(aItem, {"D3_TRT"   , cTrt    , Nil}) // amarra ao empenho (D4_TRT)
+		aAdd(aItens, aItem)
+	Next nI
+
+	aAdd(aCabBaixa, {"D3_DOC"    , SubStr(cOpCompl, 1, 6), Nil})
+	// TM 999 = requisicao automatica (reservado do sistema, nao precisa estar
+	// na SF5). Direciona o consumo como RE1.
+	aAdd(aCabBaixa, {"D3_TM"     , TM_CONSUMO            , Nil})
+	aAdd(aCabBaixa, {"D3_EMISSAO", dDataBase             , Nil})
+	aAdd(aCabBaixa, {"AUTITEMS"  , aItens                , Nil})
+
+Return aCabBaixa
+
+/*/{Protheus.doc} ConstrutorApontamento:MontarCoproduto
+Monta o node AUTCOPRODU (co-produtos = componentes com quantidade
+NEGATIVA na planilha). Igual ao padrao MATI681: quantidade INVERTIDA para
+POSITIVA, TM proprio (TM_COPRODU = 499 / devolucao). NAO referencia
+empenho (sem D3_TRT) - co-produto e saida de producao, nao consumo.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 12/06/2026
+@param aCoprodutos, Array, Co-produtos {cCod, nQtdAbs (positiva), cLocal}
+@param cOpCompl, Character, OP completa
+@return Array, Cabecalho AUTCOPRODU com AUTITEMS
+/*/
+Method MontarCoproduto(aCoprodutos, cOpCompl) Class ConstrutorApontamento
+	Local aCab   := {} as array
+	Local aItens := {} as array
+	Local aItem  := {} as array
+	Local nI     := 0  as numeric
+
+	For nI := 1 To Len(aCoprodutos)
+		aItem := {}
+		aAdd(aItem, {"D3_COD"   , aCoprodutos[nI][1], Nil})
+		aAdd(aItem, {"D3_QUANT" , aCoprodutos[nI][2], Nil}) // ja positiva
+		aAdd(aItem, {"D3_LOCAL" , aCoprodutos[nI][3], Nil})
+		aAdd(aItem, {"D3_OP"    , cOpCompl          , Nil})
+		aAdd(aItens, aItem)
+	Next nI
+
+	aAdd(aCab, {"D3_DOC"    , SubStr(cOpCompl, 1, 6), Nil})
+	aAdd(aCab, {"D3_TM"     , TM_COPRODU            , Nil}) // 499 = devolucao (co-produto)
+	aAdd(aCab, {"D3_EMISSAO", dDataBase             , Nil})
+	aAdd(aCab, {"AUTITEMS"  , aItens                , Nil})
+
+Return aCab
+
+/*/{Protheus.doc} ConstrutorApontamento:ExecutarMATA681
+Executa o ExecAuto MATA681 com o array aSH6 montado. Coleta o log em
+caso de erro e armazena em ::cUltimoErro.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aSH6, Array, Array de apontamento pronto
+@return Logical, .T. se executou sem erro
+/*/
+Method ExecutarMATA681(aSH6) Class ConstrutorApontamento
+	Local aLog     := {} as array
+	Local cMsgErro := "" as character
+	Local nI       := 0  as numeric
+
+	Private lAutoErrNoFile := .T.
+	Private lMsErroAuto    := .F.
+
+	MSExecAuto({|x,y| MATA681(x,y)}, aSH6, 3)
+
+	If lMsErroAuto
+		aLog := GetAutoGRLog()
+		cMsgErro := ""
+		For nI := 1 To Len(aLog)
+			cMsgErro += aLog[nI] + CRLF
+		Next nI
+		If Empty(cMsgErro)
+			cMsgErro := "Erro nao identificado no MATA681"
+		EndIf
+		::cUltimoErro := cMsgErro
+		Return .F.
+	EndIf
+
+Return .T.
+
+/*/{Protheus.doc} ConstrutorApontamento:JaApontada
+Verifica se a operacao (OP completa + operacao) JA possui apontamento na
+SH6 (nao deletado). Usado para idempotencia: nao reapontar uma operacao ja
+lancada (no reprocesso, ou se ja foi apontada manualmente).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 16/06/2026
+@param cOpCompl, Character, OP completa (numero + item + sequencia)
+@param cOperac, Character, Operacao (zero-padded, como no H6_OPERAC)
+@return Logical, .T. se a operacao ja foi apontada
+/*/
+Method JaApontada(cOpCompl, cOperac) Class ConstrutorApontamento
+	Local cAlias := "" as character
+	Local lJa    := .F. as logical
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT COUNT(*) AS QTD
+          FROM %table:SH6% SH6
+         WHERE SH6.H6_FILIAL = %xFilial:SH6%
+           AND SH6.H6_OP     = %Exp:cOpCompl%
+           AND SH6.H6_OPERAC = %Exp:cOperac%
+           AND SH6.%notDel%
+	EndSql
+
+	lJa := !(cAlias)->(Eof()) .And. (cAlias)->QTD > 0
+	(cAlias)->(DbCloseArea())
+
+Return lJa
+
+/*/{Protheus.doc} ConstrutorApontamento:GetLocal
+Retorna o armazem padrao (B1_LOCPAD) do produto (com cache).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cProduto, Character, Codigo SB1
+@return Character, Armazem padrao
+/*/
+Method GetLocal(cProduto) Class ConstrutorApontamento
+	Local cLocal := "" as character
+	Local cChave := "" as character
+	Local aArea  := {} as array
+
+	cChave := AllTrim(cProduto)
+
+	If ::oCacheLocal:HasProperty(cChave)
+		Return ::oCacheLocal[cChave]
+	EndIf
+
+	aArea := GetArea()
+
+	dbSelectArea("SB1")
+	SB1->(dbSetOrder(1))
+	If SB1->(dbSeek(xFilial("SB1") + cProduto))
+		cLocal := SB1->B1_LOCPAD
+	EndIf
+
+	RestArea(aArea)
+
+	::oCacheLocal[cChave] := cLocal
+
+Return cLocal
+
+/*/{Protheus.doc} ConstrutorApontamento:GetSafe
+Acesso seguro a uma propriedade de um JsonObject.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oObj, Object, JsonObject a consultar
+@param cChave, Character, Nome da propriedade
+@param xDefault, Variant, Valor default
+@return Variant, Valor da chave ou o default
+/*/
+Method GetSafe(oObj, cChave, xDefault) Class ConstrutorApontamento
+	Local xValor := xDefault
+
+	If (ValType(oObj) == "J" .Or. ValType(oObj) == "O") .And. oObj:HasProperty(cChave)
+		xValor := oObj[cChave]
+	EndIf
+
+Return xValor
+
+/*/{Protheus.doc} ConstrutorApontamento:GetUltimoErro
+Retorna o ultimo erro registrado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Character, Log do erro
+/*/
+Method GetUltimoErro() Class ConstrutorApontamento
+
+Return ::cUltimoErro

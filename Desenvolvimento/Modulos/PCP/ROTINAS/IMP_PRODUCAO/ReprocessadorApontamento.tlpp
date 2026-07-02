@@ -1,0 +1,295 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ReprocessadorApontamento
+
+using namespace Alux.PCP.ConstrutorOP
+using namespace Alux.PCP.GeradorRelatorio
+using namespace Alux.PCP.ProcessadorOP
+using namespace Alux.PCP.RepositorioStaging
+
+/*/{Protheus.doc} ReprocessadorApontamento
+Controller do reprocessamento das OPs com erro/pendentes (status E/R) da
+importacao de apontamento (tabela Z01). Reutiliza os dados de staging ja
+gravados (JSON na Z01), sem reler os arquivos XLSX. Pode reprocessar todos
+os registros E/R ou apenas uma selecao (recnos marcados no browse do
+PCPI003). Apos processar, atualiza o status de cada registro (passando o
+lote do proprio registro) e emite o relatorio consolidado.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class ReprocessadorApontamento
+
+	Public Data aResultados as array
+
+	Private Data oStaging   as object
+	Private Data oProc      as object
+	Private Data oRelat     as object
+	Private Data oConstOP   as object
+
+	Public Method New() Constructor
+	Public Method ReprocessarTodos()
+	Public Method ReprocessarSelecao(aRecnos)
+	Public Method Listar()
+
+	Private Method ProcessarLista(aLista)
+	Private Method MontarResultado(oDadosOP, oRet)
+	Private Method FinalizarRelatorio()
+
+EndClass
+
+/*/{Protheus.doc} ReprocessadorApontamento:New
+Construtor. Instancia as dependencias do fluxo de reprocessamento:
+staging (com lote vazio - cada registro carrega seu proprio lote),
+processador de OP e gerador de relatorio (identificado como "REPROC").
+No modelo novo nao ha tabelas auxiliares - o reprocessamento apenas
+rele os dados ja serializados na Z01.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Self
+/*/
+Method New() Class ReprocessadorApontamento
+
+	::aResultados := {}
+	::oStaging    := RepositorioStaging():New("")  // lote vazio - reproc usa lote do registro
+	::oProc       := ProcessadorOP():New()
+	::oRelat      := GeradorRelatorio():New("REPROC")
+	::oConstOP    := ConstrutorOP():New()          // checar se a OP existe no SC2 (rollback)
+
+Return Self
+
+/*/{Protheus.doc} ReprocessadorApontamento:Listar
+Retorna a lista leve dos registros Z01 reprocessaveis (status E/R)
+para alimentar o browse do PCPI003.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Array, Array de arrays {cLote,cOp,cOpProt,cOrdSep,cLiga,cStatus,dDtProc,cMsg,nRecno}
+/*/
+Method Listar() Class ReprocessadorApontamento
+	Local aRet := {} as array
+
+	aRet := ::oStaging:ListarReprocessaveis()
+
+Return aRet
+
+/*/{Protheus.doc} ReprocessadorApontamento:ReprocessarTodos
+Reprocessa TODAS as OPs com status E/R (qualquer lote). Valida antes
+que as tabelas auxiliares (RM/REVISAO2) estejam carregadas; caso
+contrario aborta orientando o uso do PCPI002. Ao final, gera e abre
+o relatorio consolidado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Logical, .T. se executou o reprocessamento
+/*/
+Method ReprocessarTodos() Class ReprocessadorApontamento
+	Local aLista := {} as array
+
+	aLista := ::oStaging:LerOPsReprocessar()
+	::ProcessarLista(aLista)
+	::FinalizarRelatorio()
+
+Return .T.
+
+/*/{Protheus.doc} ReprocessadorApontamento:ReprocessarSelecao
+Reprocessa apenas os registros Z01 cujos R_E_C_N_O_ foram marcados no
+browse do PCPI003. Le todas as OPs reprocessaveis via LerOPsReprocessar
+e filtra pelos recnos selecionados (comparando com o RECNO do registro
+posicionado no momento da leitura). Valida tabelas auxiliares carregadas
+(igual ReprocessarTodos). Ao final, gera e abre o relatorio consolidado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aRecnos, Array, Array de R_E_C_N_O_ (numeric) marcados no browse
+@return Logical, .T. se executou o reprocessamento
+/*/
+Method ReprocessarSelecao(aRecnos) Class ReprocessadorApontamento
+	Local aLista    := {} as array
+	Local aFiltrada := {} as array
+	Local aArea     := {} as array
+	Local oDadosOP  := Nil as object
+	Local cChave    := "" as character
+	Local oSel      := Nil as object
+	Local nI        := 0 as numeric
+	Local nRecno    := 0 as numeric
+
+	If ValType(aRecnos) != "A" .Or. Len(aRecnos) == 0
+		FWAlertWarning("Nenhum registro marcado para reprocessar.", "PCPI003")
+		Return .F.
+	EndIf
+
+	// Indexa os recnos selecionados por OP+lote para casar com oDadosOP.
+	// Resolve cada recno -> chave (lote+opProt) posicionando a Z01.
+	oSel  := JsonObject():New()
+	aArea := GetArea()
+
+
+	dbSelectArea("Z01")
+	For nI := 1 To Len(aRecnos)
+		nRecno := aRecnos[nI]
+		If ValType(nRecno) != "N" .Or. nRecno <= 0
+			Loop
+		EndIf
+		Z01->(dbGoto(nRecno))
+		If !Z01->(Eof())
+			cChave := AllTrim(Z01->Z01_LOTE) + "|" + AllTrim(Z01->Z01_OPPROT)
+			oSel[cChave] := .T.
+		EndIf
+	Next nI
+
+	RestArea(aArea)
+
+	// Le todos os reprocessaveis e mantem apenas os selecionados (por lote+OP)
+	aLista := ::oStaging:LerOPsReprocessar()
+	For nI := 1 To Len(aLista)
+		oDadosOP := aLista[nI]
+		cChave   := AllTrim(oDadosOP["cLote"]) + "|" + AllTrim(oDadosOP["cOpProt"])
+		If oSel:HasProperty(cChave)
+			aAdd(aFiltrada, oDadosOP)
+		EndIf
+	Next nI
+
+	If Len(aFiltrada) == 0
+		FWAlertWarning("Os registros marcados nao foram localizados como reprocessaveis (E/R/P).", "PCPI003")
+		Return .F.
+	EndIf
+
+	::ProcessarLista(aFiltrada)
+	::FinalizarRelatorio()
+
+Return .T.
+
+/*/{Protheus.doc} ReprocessadorApontamento:ProcessarLista
+Processa uma lista de objetos canonicos oDadosOP: para cada um chama o
+ProcessadorOP, atualiza o status na Z01 passando o lote do proprio
+registro e acumula o resultado consolidado em ::aResultados.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aLista, Array, Array de objetos oDadosOP a reprocessar
+@return Nil
+/*/
+Method ProcessarLista(aLista) Class ReprocessadorApontamento
+	Local nI       := 0 as numeric
+	Local oDadosOP := Nil as object
+	Local oRet     := Nil as object
+	Local oErr     := Nil as object
+
+	For nI := 1 To Len(aLista)
+		oDadosOP := aLista[nI]
+
+		// C-22: isola cada OP - se uma estourar, marca E e continua as demais
+		Try
+			oRet := ::oProc:Processar(oDadosOP)
+		Catch oErr
+			oRet := JsonObject():New()
+			oRet["cStatus"] := STATUS_ERRO
+			oRet["cEtapa"]  := ETAPA_OP
+			oRet["cMsg"]    := "Excecao no reprocessamento: " + ;
+				IIf(ValType(oErr) == "O", cValToChar(oErr:Description), "erro nao identificado")
+			oRet["nEmp"]    := 0
+			oRet["nApo"]    := 0
+			oRet["nSub"]    := 0
+		EndTry
+
+		// OP que NAO entrou no sistema (erro + nao existe no SC2 = estornada/
+		// rollback) e REMOVIDA da Z01. As demais atualizam status pelo RECNO.
+		If AllTrim(cValToChar(oRet["cStatus"])) == STATUS_ERRO .And. ;
+		   !::oConstOP:Existe(AllTrim(cValToChar(oDadosOP["cOpProt"])))
+			::oStaging:RemoverRecno(oDadosOP["nRecno"])
+		Else
+			// C-09: atualiza status pelo RECNO (chave forte) do proprio registro Z01,
+			// dispensando dbSeek por lote+OP
+			::oStaging:AtualizarStatusRecno(oDadosOP["nRecno"], oRet["cStatus"], oRet["cEtapa"], ;
+				oRet["cMsg"], oRet["nEmp"], oRet["nApo"], oRet["nSub"])
+		EndIf
+		aAdd(::aResultados, ::MontarResultado(oDadosOP, oRet))
+	Next nI
+
+Return Nil
+
+/*/{Protheus.doc} ReprocessadorApontamento:MontarResultado
+Monta o JsonObject de resultado consolidado de uma OP reprocessada,
+combinando os dados canonicos (oDadosOP) com o retorno do
+ProcessadorOP (oRet). Usa a mesma estrutura do ImportadorApontamento
+para alimentar o GeradorRelatorio.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oDadosOP, Object, Objeto canonico da OP (cOp, cOrdSep, cLiga, oCab, ...)
+@param oRet, Object, JsonObject de retorno do ProcessadorOP
+@return Object, JsonObject com os campos consolidados
+/*/
+Method MontarResultado(oDadosOP, oRet) Class ReprocessadorApontamento
+	Local oRes     := JsonObject():New() as object
+	Local oCab     := Nil as object
+	Local nQtdProd := 0 as numeric
+
+	oCab := IIf(oDadosOP:HasProperty("oCab"), oDadosOP["oCab"], Nil)
+	If oCab != Nil .And. (ValType(oCab) == "J" .Or. ValType(oCab) == "O") .And. oCab:HasProperty("nQtdProd")
+		nQtdProd := oCab["nQtdProd"]
+	EndIf
+
+	oRes["cNumOp"]        := AllTrim(oDadosOP["cOp"])
+	oRes["cOrdSep"]       := AllTrim(oDadosOP["cOrdSep"])
+	oRes["cLigaProd"]     := AllTrim(oDadosOP["cLiga"])
+	oRes["cStatus"]       := oRet["cStatus"]
+	oRes["cEtapa"]        := oRet["cEtapa"]
+	oRes["cMsg"]          := oRet["cMsg"]
+	oRes["cChaveIdem"]    := AllTrim(oDadosOP["cHash"])
+	oRes["nQtdProduzida"] := nQtdProd
+	oRes["nEmpenhos"]     := oRet["nEmp"]
+	oRes["nApontamentos"] := oRet["nApo"]
+	oRes["nSubprodutos"]  := oRet["nSub"]
+
+Return oRes
+
+/*/{Protheus.doc} ReprocessadorApontamento:FinalizarRelatorio
+Gera o relatorio (auditoria) e decide a saida: se houver ERRO, ABRE o Excel;
+se NAO houver erro, exibe alerta de sucesso em tela (FWAlertSuccess) sem abrir
+o Excel.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 17/06/2026
+@return Nil
+/*/
+Method FinalizarRelatorio() Class ReprocessadorApontamento
+	Local nI   := 0   as numeric
+	Local lTem := .F.  as logical
+	Local oR   := Nil as object
+
+	// Gera sempre o relatorio (auditoria).
+	::oRelat:Gerar(::aResultados)
+
+	// Houve alguma pendencia (qualquer status != sucesso pleno)?
+	For nI := 1 To Len(::aResultados)
+		oR := ::aResultados[nI]
+		If (ValType(oR) == "J" .Or. ValType(oR) == "O") .And. oR:HasProperty("cStatus") .And. ;
+		   AllTrim(cValToChar(oR["cStatus"])) != STATUS_OK
+			lTem := .T.
+			Exit
+		EndIf
+	Next nI
+
+	// Com erro -> abre o Excel; sem erro -> alerta de sucesso em tela.
+	If lTem
+		::oRelat:Abrir()
+	Else
+		FWAlertSuccess("Reprocessamento concluido com sucesso. Sem pendencias.", "Reprocessamento PCPI")
+	EndIf
+
+Return Nil

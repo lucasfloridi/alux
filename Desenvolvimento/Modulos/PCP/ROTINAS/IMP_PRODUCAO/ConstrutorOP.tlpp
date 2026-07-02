@@ -1,0 +1,454 @@
+#include "totvs.ch"
+#include "protheus.ch"
+#include "tlpp-core.th"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ConstrutorOP
+
+/*/{Protheus.doc} ConstrutorOP
+Cria Ordem de Producao (SC2) via MATA650 (ExecAuto).
+Responsavel por formatar o numero da OP a partir do padrao "563/26"
+para "000563" (zero-pad 6 caracteres descartando "/26").
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class ConstrutorOP
+
+	Public Data cUltimoErro as character
+	Public Data cUltimoOp   as character
+
+	Public Method New() Constructor
+	Public Method Existe(cOpProtheus)
+	Public Method EstaFechada(cOpProtheus)
+	Public Method GetProdutoOP(cOpProtheus)
+	Public Method FormatarNumOp(cOpOriginal)
+	Public Method Criar(oLinha, cProdutoSB1, nQuantidade)
+	Public Method ExcluirOP(cOpProtheus)
+	Public Method GetUM(cProduto)
+	Public Method GetLocal(cProduto)
+	Public Method GetUltimoErro()
+	Public Method GetUltimoOp()
+
+EndClass
+
+/*/{Protheus.doc} ConstrutorOP:New
+Construtor.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Self
+/*/
+Method New() Class ConstrutorOP
+
+	::cUltimoErro := ""
+	::cUltimoOp   := ""
+
+Return Self
+
+/*/{Protheus.doc} ConstrutorOP:Existe
+Verifica se a OP ja existe em SC2 (xFilial + C2_NUM zero-padded).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cOpProtheus, Character, Numero da OP formatado (ex: "000563")
+@return Logical, .T. se existir
+/*/
+Method Existe(cOpProtheus) Class ConstrutorOP
+	Local lExiste  := .F. as logical
+	Local aArea    := {}  as array
+
+	aArea := GetArea()
+
+	dbSelectArea("SC2")
+	SC2->(dbSetOrder(1))
+	If SC2->(dbSeek(xFilial("SC2") + cOpProtheus))
+		lExiste := .T.
+	EndIf
+
+	RestArea(aArea)
+
+Return lExiste
+
+/*/{Protheus.doc} ConstrutorOP:EstaFechada
+Verifica se a OP existente esta fechada (C2_DATRF preenchido).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cOpProtheus, Character, Numero da OP formatado (ex: "000563")
+@return Logical, .T. se a OP estiver fechada
+/*/
+Method EstaFechada(cOpProtheus) Class ConstrutorOP
+	Local lFechada := .F. as logical
+	Local aArea    := {}  as array
+
+	aArea := GetArea()
+
+	dbSelectArea("SC2")
+	SC2->(dbSetOrder(1))
+	If SC2->(dbSeek(xFilial("SC2") + cOpProtheus))
+		lFechada := !Empty(SC2->C2_DATRF)
+	EndIf
+
+	RestArea(aArea)
+
+Return lFechada
+
+/*/{Protheus.doc} ConstrutorOP:GetProdutoOP
+Retorna o produto (C2_PRODUTO) de uma OP existente. Usado para validar
+que uma OP ja existente corresponde ao produto esperado (evita apontar
+em OP errada por colisao de numero - A-06).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cOpProtheus, Character, Numero da OP formatado (ex: "000563")
+@return Character, Codigo do produto da OP ou "" se nao existir
+/*/
+Method GetProdutoOP(cOpProtheus) Class ConstrutorOP
+	Local cProduto := "" as character
+	Local aArea    := {}  as array
+
+	aArea := GetArea()
+
+	dbSelectArea("SC2")
+	SC2->(dbSetOrder(1))
+	If SC2->(dbSeek(xFilial("SC2") + cOpProtheus))
+		cProduto := AllTrim(SC2->C2_PRODUTO)
+	EndIf
+
+	RestArea(aArea)
+
+Return cProduto
+
+/*/{Protheus.doc} ConstrutorOP:FormatarNumOp
+Monta o C2_NUM no padrao Alux: numero da ordem zero-padded + sufixo do
+ano (2 digitos), totalizando o tamanho do C2_NUM (6). A OP SEMPRE termina
+com o ano.
+  182  -> "0182" + "26" = "018226"
+  1182 -> "1182" + "26" = "118226"
+O sufixo de ano (2 digitos) vem do ANO da data de referencia (dRef = data
+de emissao da OP). Assim 2026 -> "26", 2027 -> "27", e como a data de
+emissao nao muda, o numero e o mesmo na importacao e no reprocessamento.
+Se a origem vier "182/26", o sufixo apos a "/" e descartado (reaplica o ano).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 09/06/2026
+@param cOpOriginal, Character, Numero da ordem (ex: "182", "1182" ou "182/26")
+@param dRef, Date, Data de referencia para o ano (emissao da OP). Default dDataBase
+@return Character, C2_NUM no padrao NNNN + AA (ex: "018226")
+/*/
+Method FormatarNumOp(cOpOriginal, dRef) Class ConstrutorOP
+	Local cNum    := "" as character
+	Local cAno    := "" as character
+	Local nPos    := 0  as numeric
+	Local nVal    := 0  as numeric
+	Local nTam    := 0  as numeric
+	Local nTamNum := 0  as numeric
+
+	Default dRef := dDataBase
+	If ValType(dRef) != "D" .Or. Empty(dRef)
+		dRef := dDataBase
+	EndIf
+
+	cNum := AllTrim(cValToChar(cOpOriginal))
+	nPos := At("/", cNum)
+	If nPos > 0
+		cNum := SubStr(cNum, 1, nPos - 1)   // descarta sufixo apos "/"
+	EndIf
+	cNum := AllTrim(cNum)
+
+	If Empty(cNum)
+		Return ""
+	EndIf
+
+	// Tamanho do C2_NUM (6); reserva 2 posicoes finais para o ano
+	nTam    := TamSX3("C2_NUM")[1]
+	nTamNum := nTam - 2
+
+	nVal := Val(cNum)
+	If nVal <= 0 .Or. nVal > (10 ** nTamNum) - 1
+		Return ""
+	EndIf
+
+	// Sufixo = 2 ultimos digitos do ano da data de emissao
+	cAno := Right(StrZero(Year(dRef), 4), 2)
+
+Return StrZero(nVal, nTamNum) + cAno
+
+/*/{Protheus.doc} ConstrutorOP:Criar
+Cria a OP via MATA650 ExecAuto.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oLinha, Object, Linha do saidas_rotativo com dados base
+@param cProdutoSB1, Character, Codigo SB1 do produto a produzir
+@param nQuantidade, Numeric, Quantidade da OP
+@return Character, Numero da OP criada ou "" em caso de erro
+/*/
+Method Criar(oLinha, cProdutoSB1, nQuantidade) Class ConstrutorOP
+	Local aOrdem     := {} as array
+	Local cOpFormat  := "" as character
+	Local cNumGerado := "" as character
+	Local dDataIni   := dDataBase as date
+	Local dDataFim   := dDataBase as date
+	Local aLog       := {} as array
+	Local cMsgErro   := "" as character
+	Local cUM        := "" as character
+	Local cLocal     := "" as character
+	Local cObs       := "" as character
+	Local cRoteiro   := "" as character
+	Local dDtInclus  := dDataBase as date
+	Local dDtBaseAnt := dDataBase as date
+	Local nI         := 0  as numeric
+	Private lAutoErrNoFile := .T.
+	Private lMsErroAuto    := .F.
+
+	::cUltimoErro := ""
+	::cUltimoOp   := ""
+
+	If oLinha:HasProperty("dInicio") .And. !Empty(oLinha["dInicio"])
+		dDataIni := oLinha["dInicio"]
+	EndIf
+	If oLinha:HasProperty("dFim") .And. !Empty(oLinha["dFim"])
+		dDataFim := oLinha["dFim"]
+	EndIf
+
+	// Data de inclusao da OP (C2_EMISSAO segue a data base no MATA650):
+	// usa dt_emissao do t_producao; fallback previsao_inicio; senao a atual.
+	// Tambem define o ano do numero da OP (sufixo do C2_NUM).
+	dDtInclus := dDataBase
+	If oLinha:HasProperty("dEmissao") .And. ValType(oLinha["dEmissao"]) == "D" .And. !Empty(oLinha["dEmissao"])
+		dDtInclus := oLinha["dEmissao"]
+	ElseIf oLinha:HasProperty("dInicio") .And. ValType(oLinha["dInicio"]) == "D" .And. !Empty(oLinha["dInicio"])
+		dDtInclus := oLinha["dInicio"]
+	EndIf
+
+	cOpFormat := ::FormatarNumOp(oLinha["cOrdProd"], dDtInclus)
+	If Empty(cOpFormat)
+		::cUltimoErro := "Numero de OP invalido: " + cValToChar(oLinha["cOrdProd"])
+		Return ""
+	EndIf
+
+	cUM    := ::GetUM(cProdutoSB1)
+	cLocal := ::GetLocal(cProdutoSB1)
+	// C2_OBS = numero da ordem de separacao (campo ordem_separacao do excel).
+	// Vem em oLinha["cOrdSep"], setado pelo ProcessadorOP a partir do
+	// oDadosOP["cOrdSep"] (= Z01_ORDSEP). Fallback: identificacao da importacao.
+	If oLinha:HasProperty("cOrdSep") .And. !Empty(AllTrim(cValToChar(oLinha["cOrdSep"])))
+		cObs := AllTrim(cValToChar(oLinha["cOrdSep"]))
+	Else
+		cObs := "Importacao PCPI001 - OP " + AllTrim(cValToChar(oLinha["cOrdProd"]))
+	EndIf
+
+	// Roteiro EXPLICITO do t_producao, zero-padded no tamanho do C2_ROTEIRO
+	// (ex.: "1" -> "01"). Se vazio, MATA650 usa o padrao.
+	If oLinha:HasProperty("cRoteiro") .And. !Empty(AllTrim(cValToChar(oLinha["cRoteiro"])))
+		cRoteiro := StrZero(Val(AllTrim(cValToChar(oLinha["cRoteiro"]))), TamSX3("C2_ROTEIRO")[1])
+	EndIf
+
+	aAdd(aOrdem, {"C2_FILIAL"  , xFilial("SC2")                       , Nil})
+	aAdd(aOrdem, {"C2_ITEM"    , StrZero(1, TamSX3("C2_ITEM")[1])     , Nil})
+	aAdd(aOrdem, {"C2_SEQUEN"  , StrZero(1, TamSX3("C2_SEQUEN")[1])   , Nil})
+	aAdd(aOrdem, {"C2_NUM"     , cOpFormat                            , Nil})
+	aAdd(aOrdem, {"C2_PRODUTO" , cProdutoSB1                          , Nil})
+	If !Empty(cRoteiro)
+		aAdd(aOrdem, {"C2_ROTEIRO" , cRoteiro                         , Nil})
+	EndIf
+	aAdd(aOrdem, {"C2_QUANT"   , nQuantidade                          , Nil})
+	aAdd(aOrdem, {"C2_LOCAL"   , cLocal                               , Nil})
+	aAdd(aOrdem, {"C2_DATPRI"  , dDataIni                             , Nil})
+	aAdd(aOrdem, {"C2_DATPRF"  , dDataFim                             , Nil})
+	aAdd(aOrdem, {"C2_OBS"     , SubStr(cObs, 1, TamSX3("C2_OBS")[1]) , Nil})
+	// AUTEXPLODE "N": NAO explode a estrutura/BOM. Assim o empenho (SD4) NAO
+	// recebe os componentes da estrutura - fica apenas com os produtos
+	// importados do t_materia_primas (criados depois via MATA381).
+	aAdd(aOrdem, {"AUTEXPLODE" , "N"                                  , Nil})
+
+	// Altera a data base do sistema para a data de inclusao da OP. No MATA650
+	// a C2_EMISSAO assume a data base; restaura IMEDIATAMENTE apos o ExecAuto
+	// (mesmo em erro) para nao afetar empenho/apontamento das proximas etapas.
+	dDtBaseAnt := dDataBase
+	dDataBase := dDtInclus// SetdDataBase(dDtInclus)
+
+	MSExecAuto({|x,y| MATA650(x,y)}, aOrdem, 3)
+
+	dDataBase := dDtBaseAnt// SetdDataBase(dDtBaseAnt)
+
+	If lMsErroAuto
+		aLog := GetAutoGRLog()
+		cMsgErro := ""
+		For nI := 1 To Len(aLog)
+			cMsgErro += aLog[nI] + CRLF
+		Next nI
+		If Empty(cMsgErro)
+			cMsgErro := "Erro nao identificado no MATA650"
+		EndIf
+		::cUltimoErro := cMsgErro
+		Return ""
+	EndIf
+
+	cNumGerado  := cOpFormat
+	::cUltimoOp := cNumGerado
+
+Return cNumGerado
+
+/*/{Protheus.doc} ConstrutorOP:ExcluirOP
+Exclui a OP (SC2) via MATA650 ExecAuto (nOpcAuto = 5). Remove todos os
+itens/sequencias da OP e cascata os empenhos (SD4), revertendo saldo.
+Falha se a OP tiver movimento que impeca a exclusao (ex: ja apontada).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 09/06/2026
+@param cOpProtheus, Character, Numero da OP (C2_NUM, ex: "018226")
+@return Logical, .T. se excluiu
+/*/
+Method ExcluirOP(cOpProtheus) Class ConstrutorOP
+	Local lOk      := .F. as logical
+	Local aOrdem   := {}  as array
+	Local aArea    := {}  as array
+	Local aLog     := {}  as array
+	Local cMsgErro := ""  as character
+	Local nI       := 0   as numeric
+	Local nSafe    := 0   as numeric
+	Private lAutoErrNoFile := .T.
+	Private lMsErroAuto    := .F.
+
+	::cUltimoErro := ""
+
+	If Empty(AllTrim(cValToChar(cOpProtheus)))
+		::cUltimoErro := "Numero de OP nao informado para exclusao"
+		Return .F.
+	EndIf
+
+	aArea := GetArea()
+
+	dbSelectArea("SC2")
+	SC2->(dbSetOrder(1)) // C2_FILIAL+C2_NUM+C2_ITEM+C2_SEQUEN
+
+	If !SC2->(dbSeek(xFilial("SC2") + cOpProtheus))
+		::cUltimoErro := "OP nao encontrada para exclusao: " + AllTrim(cOpProtheus)
+		RestArea(aArea)
+		Return .F.
+	EndIf
+
+	// Exclui item a item (a OP pode ter varias sequencias). Reposiciona apos
+	// cada exclusao. nSafe limita o laco (protecao contra loop infinito).
+	Do While SC2->(!Eof()) .And. SC2->C2_FILIAL == xFilial("SC2") .And. AllTrim(SC2->C2_NUM) == AllTrim(cOpProtheus) .And. nSafe < 999
+		nSafe++
+		lMsErroAuto := .F.
+
+		aOrdem := {}
+		aAdd(aOrdem, {"C2_FILIAL"  , SC2->C2_FILIAL  , Nil})
+		aAdd(aOrdem, {"C2_NUM"     , SC2->C2_NUM     , Nil})
+		aAdd(aOrdem, {"C2_ITEM"    , SC2->C2_ITEM    , Nil})
+		aAdd(aOrdem, {"C2_SEQUEN"  , SC2->C2_SEQUEN  , Nil})
+		aAdd(aOrdem, {"C2_PRODUTO" , SC2->C2_PRODUTO , Nil})
+
+		MSExecAuto({|x,y| MATA650(x,y)}, aOrdem, 5) // 5 = exclusao
+
+		If lMsErroAuto
+			aLog := GetAutoGRLog()
+			cMsgErro := ""
+			For nI := 1 To Len(aLog)
+				cMsgErro += aLog[nI] + CRLF
+			Next nI
+			If Empty(cMsgErro)
+				cMsgErro := "Erro nao identificado ao excluir OP " + AllTrim(cOpProtheus)
+			EndIf
+			::cUltimoErro := cMsgErro
+			RestArea(aArea)
+			Return .F.
+		EndIf
+
+		// reposiciona para a proxima sequencia da mesma OP (se houver)
+		SC2->(dbSetOrder(1))
+		If !SC2->(dbSeek(xFilial("SC2") + cOpProtheus))
+			Exit
+		EndIf
+	EndDo
+
+	lOk := .T.
+	RestArea(aArea)
+
+Return lOk
+
+/*/{Protheus.doc} ConstrutorOP:GetUM
+Busca unidade de medida padrao do produto em SB1.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cProduto, Character, Codigo do produto SB1
+@return Character, Unidade de medida (B1_UM)
+/*/
+Method GetUM(cProduto) Class ConstrutorOP
+	Local cUM   := "" as character
+	Local aArea := {} as array
+
+	aArea := GetArea()
+
+	dbSelectArea("SB1")
+	SB1->(dbSetOrder(1))
+	If SB1->(dbSeek(xFilial("SB1") + cProduto))
+		cUM := SB1->B1_UM
+	EndIf
+
+	RestArea(aArea)
+
+Return cUM
+
+/*/{Protheus.doc} ConstrutorOP:GetLocal
+Busca armazem padrao do produto em SB1.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cProduto, Character, Codigo do produto SB1
+@return Character, Armazem padrao (B1_LOCPAD)
+/*/
+Method GetLocal(cProduto) Class ConstrutorOP
+	Local cLocal := "" as character
+	Local aArea  := {} as array
+
+	aArea := GetArea()
+
+	dbSelectArea("SB1")
+	SB1->(dbSetOrder(1))
+	If SB1->(dbSeek(xFilial("SB1") + cProduto))
+		cLocal := SB1->B1_LOCPAD
+	EndIf
+
+	RestArea(aArea)
+
+Return cLocal
+
+/*/{Protheus.doc} ConstrutorOP:GetUltimoErro
+Retorna o ultimo erro registrado pelo ExecAuto.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Character, Log do erro
+/*/
+Method GetUltimoErro() Class ConstrutorOP
+Return ::cUltimoErro
+
+/*/{Protheus.doc} ConstrutorOP:GetUltimoOp
+Retorna o numero da ultima OP criada com sucesso.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Character, Numero da OP zero-padded ou ""
+/*/
+Method GetUltimoOp() Class ConstrutorOP
+Return ::cUltimoOp

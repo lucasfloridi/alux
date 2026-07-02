@@ -1,0 +1,975 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "topconn.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.RepositorioStaging
+
+/*/{Protheus.doc} RepositorioStaging
+Classe dona da tabela Z01 (unificada). Cada registro representa 1 OP por
+lote, contendo os dados brutos das 3 origens em JSON (staging) + status +
+controle de reprocessamento. Responsavel por gravar, atualizar, ler e
+serializar/deserializar os dados de staging.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class RepositorioStaging
+
+	Public Data cLote      as character
+	Public Data aErros     as array
+	Private Data oCacheIdem as object
+
+	Public Method New(cLote) Constructor
+	Public Method GerarHash(oDadosOP)
+	Public Method JaProcessado(cHash)
+	Public Method ExisteOP(cOpProt, cLoteExcluir)
+	Public Method RemoverRecno(nRecno)
+	Public Method CarregarCacheIdem(nDias)
+	Public Method GravarOP(oDadosOP)
+	Public Method AtualizarStatus(cOpProt, cStatus, cEtapa, cMsg, nEmp, nApo, nSub, cLote)
+	Public Method AtualizarStatusRecno(nRecno, cStatus, cEtapa, cMsg, nEmp, nApo, nSub)
+	Public Method MarcarCacheIdem(cHash)
+	Public Method LerOPsPendentes(cLote)
+	Public Method LerOPsReprocessar()
+	Public Method ListarReprocessaveis()
+	Public Method GetErros()
+
+	Private Method GetSafe(oObj, cChave, xDefault)
+	Private Method MontarODados()
+	Private Method SerializeObj(oObj)
+	Private Method SerializeArr(aArr)
+	Private Method DeserializeObj(cJson)
+	Private Method DeserializeArr(cJson)
+	Private Method EhDataStr(cNome, xVal)
+
+EndClass
+
+/*/{Protheus.doc} RepositorioStaging:New
+Construtor. Recebe o numero do lote da importacao.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cLote, Character, Numero do lote da importacao
+@return Self
+/*/
+Method New(cLote) Class RepositorioStaging
+
+	::cLote      := IIf(ValType(cLote) == "C", cLote, "")
+	::aErros     := {}
+	::oCacheIdem := Nil
+
+Return Self
+
+/*/{Protheus.doc} RepositorioStaging:GerarHash
+Gera hash MD5 deterministico da OP a partir da OP origem, ordem de
+separacao, liga e quantidade do cabecalho. Usado como chave de
+idempotencia (Z01_HASH).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oDadosOP, Object, Objeto canonico de dados da OP
+@return Character, Hash em hexadecimal de 32 posicoes
+/*/
+Method GerarHash(oDadosOP) Class RepositorioStaging
+	Local cHash    := "" as character
+	Local cBase    := "" as character
+	Local aEmp     := {} as array
+	Local aApo     := {} as array
+	Local nI       := 0  as numeric
+	Local nSomaEmp := 0  as numeric
+	Local nSomaApo := 0  as numeric
+	Local cBin     := "" as character
+	Local cHexD    := "0123456789abcdef" as character
+	Local nByte    := 0  as numeric
+
+	If ValType(oDadosOP) != "J" .And. ValType(oDadosOP) != "O"
+		Return ""
+	EndIf
+
+	cBase := AllTrim(::GetSafe(oDadosOP, "cOpOrig", "")) + "|" + ;
+		AllTrim(::GetSafe(oDadosOP, "cOrdSep", "")) + "|" + ;
+		AllTrim(::GetSafe(oDadosOP, "cLiga", ""))
+
+	// quantidade do cabecalho para distinguir reapontamentos
+	If oDadosOP:HasProperty("oCab") .And. oDadosOP["oCab"] != Nil
+		cBase += "|" + AllTrim(cValToChar(::GetSafe(oDadosOP["oCab"], "nQtdProd", 0)))
+	EndIf
+
+	// A-02: inclui consumos (aEmp) e apontamentos (aApo) no hash para
+	// distinguir OPs com mesmo cabecalho mas movimento diferente
+	aEmp := ::GetSafe(oDadosOP, "aEmp", {})
+	aApo := ::GetSafe(oDadosOP, "aApo", {})
+
+	If ValType(aEmp) == "A"
+		nSomaEmp := 0
+		For nI := 1 To Len(aEmp)
+			If aEmp[nI] != Nil .And. (ValType(aEmp[nI]) == "J" .Or. ValType(aEmp[nI]) == "O") .And. aEmp[nI]:HasProperty("nQtd")
+				nSomaEmp += aEmp[nI]["nQtd"]
+			EndIf
+		Next nI
+		cBase += "|E" + cValToChar(Len(aEmp)) + ":" + AllTrim(cValToChar(nSomaEmp))
+	EndIf
+
+	If ValType(aApo) == "A"
+		nSomaApo := 0
+		For nI := 1 To Len(aApo)
+			If aApo[nI] != Nil .And. (ValType(aApo[nI]) == "J" .Or. ValType(aApo[nI]) == "O") .And. aApo[nI]:HasProperty("nQtd")
+				nSomaApo += aApo[nI]["nQtd"]
+			EndIf
+		Next nI
+		cBase += "|A" + cValToChar(Len(aApo)) + ":" + AllTrim(cValToChar(nSomaApo))
+	EndIf
+
+	// MD5 retorna binario (16 bytes) neste build - converte para HEX (32 chars)
+	// manualmente. Hex e SQL-safe (sem aspas/chaves/bytes de controle) e
+	// independe do parametro de formato do MD5, que varia entre builds.
+	cBin  := MD5(cBase, 1)
+	cHash := ""
+	For nI := 1 To Len(cBin)
+		nByte := Asc(SubStr(cBin, nI, 1))
+		cHash += SubStr(cHexD, Int(nByte / 16) + 1, 1) + SubStr(cHexD, (nByte % 16) + 1, 1)
+	Next nI
+
+Return Left(cHash, TAM_Z01_HASH)
+
+/*/{Protheus.doc} RepositorioStaging:JaProcessado
+Verifica se a OP (pelo hash) ja foi processada. Consulta primeiro o
+cache em memoria e depois a Z01 via BeginSql. Status que contam como
+processado: S, W, I (NAO E, pois E pode ser reprocessado).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cHash, Character, Hash de idempotencia da OP
+@return Logical, .T. se ja processado
+/*/
+Method JaProcessado(cHash) Class RepositorioStaging
+	Local cAlias := "" as character
+	Local lJa    := .F. as logical
+
+	If Empty(cHash)
+		Return .F.
+	EndIf
+
+	If ::oCacheIdem != Nil .And. ::oCacheIdem:HasProperty(AllTrim(cHash))
+		Return .T.
+	EndIf
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT COUNT(*) AS QTD
+          FROM %table:Z01% Z01
+         WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+           AND Z01.Z01_HASH   = %Exp:cHash%
+           AND Z01.Z01_STATUS IN ('S','W','I')
+           AND Z01.%notDel%
+	EndSql
+
+	lJa := !(cAlias)->(Eof()) .And. (cAlias)->QTD > 0
+	(cAlias)->(DbCloseArea())
+
+Return lJa
+
+/*/{Protheus.doc} RepositorioStaging:ExisteOP
+Verifica se JA existe um registro Z01 (qualquer status, nao deletado) para
+a OP Protheus informada. Usado na importacao para NAO reincluir uma OP que
+ja esta na tabela chave (evita OP repetida no browse). Diferente de
+JaProcessado (que filtra por hash + status S/W/I), este checa pelo NUMERO
+da OP, independente do conteudo/status.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 15/06/2026
+@param cOpProt, Character, Numero da OP no Protheus (Z01_OPPROT)
+@param cLoteExcluir, Character, Lote a EXCLUIR da busca (a propria execucao corrente). Opcional - quando informado, so considera registros de OUTROS lotes (importacoes anteriores)
+@return Logical, .T. se ja existe
+/*/
+Method ExisteOP(cOpProt, cLoteExcluir) Class RepositorioStaging
+	Local cAlias  := "" as character
+	Local lExiste := .F. as logical
+	Local cOp     := "" as character
+	Local cLoteEx := "" as character
+
+	cOp := AllTrim(cValToChar(cOpProt))
+	If Empty(cOp)
+		Return .F.
+	EndIf
+
+	// Lote a desconsiderar (execucao corrente): assim o ExisteOP detecta apenas
+	// OPs ja gravadas por importacoes ANTERIORES, nunca a propria rodada.
+	cLoteEx := AllTrim(cValToChar(cLoteExcluir))
+
+	cAlias := GetNextAlias()
+	If Empty(cLoteEx)
+		BeginSql Alias cAlias
+            SELECT COUNT(*) AS QTD
+              FROM %table:Z01% Z01
+             WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+               AND Z01.Z01_OPPROT = %Exp:cOp%
+               AND Z01.%notDel%
+		EndSql
+	Else
+		BeginSql Alias cAlias
+            SELECT COUNT(*) AS QTD
+              FROM %table:Z01% Z01
+             WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+               AND Z01.Z01_OPPROT = %Exp:cOp%
+               AND Z01.Z01_LOTE  <> %Exp:cLoteEx%
+               AND Z01.%notDel%
+		EndSql
+	EndIf
+
+	lExiste := !(cAlias)->(Eof()) .And. (cAlias)->QTD > 0
+	(cAlias)->(DbCloseArea())
+
+Return lExiste
+
+/*/{Protheus.doc} RepositorioStaging:RemoverRecno
+Remove (deleta logicamente) o registro Z01 posicionado pelo R_E_C_N_O_.
+Usado quando a OP NAO entra no sistema (estornada/rollback ou nao criada):
+nesses casos a OP nao pode ficar na Z01.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 15/06/2026
+@param nRecno, Numeric, R_E_C_N_O_ do registro Z01
+@return Logical, .T. se removeu
+/*/
+Method RemoverRecno(nRecno) Class RepositorioStaging
+	Local aArea := {} as array
+	Local lOk   := .F. as logical
+
+	If ValType(nRecno) != "N" .Or. nRecno <= 0
+		aAdd(::aErros, "RemoverRecno: recno invalido")
+		Return .F.
+	EndIf
+
+	aArea := GetArea()
+
+	dbSelectArea("Z01")
+	Z01->(dbGoto(nRecno))
+	If !Z01->(Eof()) .And. RecLock("Z01", .F.)
+		dbDelete()
+		Z01->(MsUnlock())
+		lOk := .T.
+	Else
+		aAdd(::aErros, "Falha ao posicionar/bloquear Z01 para remover recno=" + cValToChar(nRecno))
+	EndIf
+
+	RestArea(aArea)
+
+Return lOk
+
+/*/{Protheus.doc} RepositorioStaging:CarregarCacheIdem
+Carrega em memoria os hashes recentes (status S/W/I) dentro da janela
+de dias informada, evitando consultas repetidas em JaProcessado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param nDias, Numeric, Quantidade de dias para tras a considerar
+@return Nil
+/*/
+Method CarregarCacheIdem(nDias) Class RepositorioStaging
+	Local cAlias := "" as character
+	Local dCorte := CtoD("") as date
+	Local cCorte := "" as character
+
+	::oCacheIdem := JsonObject():New()
+
+	If ValType(nDias) != "N"
+		nDias := CACHE_IDEM_DIAS
+	EndIf
+
+	dCorte := dDataBase - nDias
+	cCorte := DtoS(dCorte)
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT Z01_HASH
+          FROM %table:Z01% Z01
+         WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+           AND Z01.Z01_DTIMP  >= %Exp:cCorte%
+           AND Z01.Z01_STATUS IN ('S','W','I')
+           AND Z01.%notDel%
+	EndSql
+
+	While !(cAlias)->(Eof())
+		If !Empty(AllTrim((cAlias)->Z01_HASH))
+			::oCacheIdem[AllTrim((cAlias)->Z01_HASH)] := .T.
+		EndIf
+		(cAlias)->(dbSkip())
+	EndDo
+	(cAlias)->(DbCloseArea())
+
+Return Nil
+
+/*/{Protheus.doc} RepositorioStaging:GravarOP
+Insere 1 registro Z01 com os 3 JSON (cabecalho, empenhos, apontamento)
+e status inicial "P" (Pendente). Os JSON sao serializados convertendo
+datas para string DtoS.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oDadosOP, Object, Objeto canonico de dados da OP
+@return Logical, .T. se gravou
+/*/
+Method GravarOP(oDadosOP) Class RepositorioStaging
+	Local aArea  := {} as array
+	Local lOk    := .F. as logical
+	Local cJsCab := "" as character
+	Local cJsEmp := "" as character
+	Local cJsApo := "" as character
+	Local oCab    := Nil as object
+	Local cCodLig := "" as character
+	Local dFin    := CtoD("") as date
+
+	aArea := GetArea()
+
+	Try
+		cJsCab := ::SerializeObj(::GetSafe(oDadosOP, "oCab", Nil))
+		cJsEmp := ::SerializeArr(::GetSafe(oDadosOP, "aEmp", {}))
+		cJsApo := ::SerializeArr(::GetSafe(oDadosOP, "aApo", {}))
+
+		// Campos de exibicao no browse PCPI003: codigo da liga produzida (= CODIGO
+		// do produto da OP, oCab["cProduto"]) e data final (= ENTREGA, oCab["dFim"]).
+		oCab    := ::GetSafe(oDadosOP, "oCab", Nil)
+		cCodLig := AllTrim(cValToChar(::GetSafe(oCab, "cProduto", "")))
+		dFin    := ::GetSafe(oCab, "dFim", CtoD(""))
+		If ValType(dFin) != "D"
+			dFin := CtoD("")
+		EndIf
+
+		dbSelectArea("Z01")
+		If RecLock("Z01", .T.)
+			Z01->Z01_FILIAL := xFilial("Z01")
+			Z01->Z01_LOTE   := ::cLote
+			Z01->Z01_OP     := SubStr(AllTrim(::GetSafe(oDadosOP, "cOp", "")), 1, TAM_Z01_OP)
+			Z01->Z01_OPPROT := SubStr(AllTrim(::GetSafe(oDadosOP, "cOpProt", "")), 1, TAM_C2_NUM)
+			Z01->Z01_ORDSEP := SubStr(AllTrim(::GetSafe(oDadosOP, "cOrdSep", "")), 1, TAM_Z01_ORDSEP)
+			Z01->Z01_LIGA   := SubStr(AllTrim(::GetSafe(oDadosOP, "cLiga", "")), 1, 30)
+			// Campos novos (browse): so grava se ja existirem no dicionario
+			// (FieldPos evita erro de runtime antes da criacao no Configurador).
+			If Z01->(FieldPos("Z01_CODLIG")) > 0
+				Z01->Z01_CODLIG := SubStr(cCodLig, 1, TAM_Z01_CODLIG)  // codigo da liga produzida
+			EndIf
+			If Z01->(FieldPos("Z01_DTFIN")) > 0
+				Z01->Z01_DTFIN := dFin                                 // data final (entrega)
+			EndIf
+			Z01->Z01_STATUS := "P"
+			Z01->Z01_ETAPA  := ETAPA_LEIT
+			Z01->Z01_TENTAT := 0
+			Z01->Z01_HASH   := SubStr(AllTrim(::GetSafe(oDadosOP, "cHash", "")), 1, TAM_Z01_HASH)
+			Z01->Z01_USER   := SubStr(AllTrim(::GetSafe(oDadosOP, "cUser", "")), 1, 6)
+			Z01->Z01_USERNM := SubStr(AllTrim(::GetSafe(oDadosOP, "cUserNm", "")), 1, 30)
+			Z01->Z01_DTIMP  := dDataBase
+			Z01->Z01_HRIMP  := Time()
+			Z01->Z01_ARQUIV := SubStr(AllTrim(::GetSafe(oDadosOP, "cArquivo", "")), 1, TAM_Z01_ARQUIV)
+			Z01->Z01_MSG    := "Importado - aguardando processamento"
+			Z01->Z01_JSCAB  := cJsCab
+			Z01->Z01_JSEMP  := cJsEmp
+			Z01->Z01_JSAPO  := cJsApo
+			// Devolve o R_E_C_N_O_ para o chamador processar de memoria na
+			// Fase 2 e atualizar o status direto pelo recno.
+			If ValType(oDadosOP) == "J" .Or. ValType(oDadosOP) == "O"
+				oDadosOP["nRecno"] := Z01->(Recno())
+			EndIf
+			Z01->(MsUnlock())
+			lOk := .T.
+		Else
+			aAdd(::aErros, "Falha RecLock Z01 ao gravar OP " + AllTrim(::GetSafe(oDadosOP, "cOp", "")))
+		EndIf
+	Catch oErr
+		aAdd(::aErros, "Excecao GravarOP: " + oErr:Description)
+	EndTry
+
+	RestArea(aArea)
+
+Return lOk
+
+/*/{Protheus.doc} RepositorioStaging:AtualizarStatus
+Localiza o registro Z01 pelo lote + OP Protheus e atualiza o status,
+etapa, mensagem, quantidades e datas de processamento. Incrementa o
+contador de tentativas (Z01_TENTAT).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cOpProt, Character, Numero da OP no Protheus
+@param cStatus, Character, Novo status (S/E/R/I/W)
+@param cEtapa, Character, Etapa alcancada
+@param cMsg, Character, Mensagem de processamento
+@param nEmp, Numeric, Qtd de empenhos
+@param nApo, Numeric, Qtd de apontamentos
+@param nSub, Numeric, Qtd de subprodutos
+@param cLote, Character, Lote do registro (opcional - default ::cLote). Usado no reprocessamento (PCPI003)
+@return Logical, .T. se atualizou
+/*/
+Method AtualizarStatus(cOpProt, cStatus, cEtapa, cMsg, nEmp, nApo, nSub, cLote) Class RepositorioStaging
+	Local aArea     := {} as array
+	Local lOk       := .F. as logical
+	Local cLoteUsar := "" as character
+
+	nEmp := IIf(ValType(nEmp) == "N", nEmp, 0)
+	nApo := IIf(ValType(nApo) == "N", nApo, 0)
+	nSub := IIf(ValType(nSub) == "N", nSub, 0)
+
+	// Retrocompatibilidade: chamadas com 7 args usam ::cLote.
+	// Reprocessamento (PCPI003) passa o lote do proprio registro.
+	cLoteUsar := IIf(ValType(cLote) == "C" .And. !Empty(cLote), cLote, ::cLote)
+
+	aArea := GetArea()
+
+	dbSelectArea("Z01")
+	Z01->(dbSetOrder(4))  // Z01_FILIAL+Z01_OPPROT
+	If Z01->(dbSeek(xFilial("Z01") + cOpProt))
+		// localizar o registro do lote corrente
+		While !Z01->(Eof()) .And. Z01->Z01_FILIAL == xFilial("Z01") .And. AllTrim(Z01->Z01_OPPROT) == AllTrim(cOpProt)
+			If AllTrim(Z01->Z01_LOTE) == AllTrim(cLoteUsar)
+				If RecLock("Z01", .F.)
+					Z01->Z01_STATUS := cStatus
+					Z01->Z01_ETAPA  := cEtapa
+					Z01->Z01_MSG    := AllTrim(cMsg)   // memo - sem truncar (mensagem completa do ExecAuto)
+					Z01->Z01_QTDEMP := nEmp
+					Z01->Z01_QTDAPO := nApo
+					Z01->Z01_QTDSUB := nSub
+					Z01->Z01_DTPROC := dDataBase
+					Z01->Z01_HRPROC := Time()
+					Z01->Z01_TENTAT := Z01->Z01_TENTAT + 1
+					Z01->(MsUnlock())
+					lOk := .T.
+				Else
+					aAdd(::aErros, "Falha RecLock Z01 ao atualizar OP " + AllTrim(cOpProt))
+				EndIf
+				Exit
+			EndIf
+			Z01->(dbSkip())
+		EndDo
+	EndIf
+
+	If !lOk .And. Len(::aErros) == 0
+		aAdd(::aErros, "Registro Z01 nao localizado - lote=" + cLoteUsar + " opProt=" + AllTrim(cOpProt))
+	EndIf
+
+	RestArea(aArea)
+
+Return lOk
+
+/*/{Protheus.doc} RepositorioStaging:AtualizarStatusRecno
+Atualiza o status/etapa/mensagem/quantidades de um registro Z01
+posicionando-o diretamente pelo R_E_C_N_O_ (chave forte), evitando o
+dbSeek por OP/lote. Incrementa o contador de tentativas (Z01_TENTAT).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 31/05/2026
+@param nRecno, Numeric, R_E_C_N_O_ do registro Z01
+@param cStatus, Character, Novo status (S/E/R/I/W)
+@param cEtapa, Character, Etapa alcancada
+@param cMsg, Character, Mensagem de processamento
+@param nEmp, Numeric, Qtd de empenhos
+@param nApo, Numeric, Qtd de apontamentos
+@param nSub, Numeric, Qtd de subprodutos
+@return Logical, .T. se atualizou
+/*/
+Method AtualizarStatusRecno(nRecno, cStatus, cEtapa, cMsg, nEmp, nApo, nSub) Class RepositorioStaging
+	Local aArea := {} as array
+	Local lOk   := .F. as logical
+
+	nEmp := IIf(ValType(nEmp) == "N", nEmp, 0)
+	nApo := IIf(ValType(nApo) == "N", nApo, 0)
+	nSub := IIf(ValType(nSub) == "N", nSub, 0)
+
+	If ValType(nRecno) != "N" .Or. nRecno <= 0
+		aAdd(::aErros, "AtualizarStatusRecno: recno invalido")
+		Return .F.
+	EndIf
+
+	aArea := GetArea()
+
+	dbSelectArea("Z01")
+	Z01->(dbGoto(nRecno))
+	If !Z01->(Eof()) .And. RecLock("Z01", .F.)
+		Z01->Z01_STATUS := cStatus
+		Z01->Z01_ETAPA  := cEtapa
+		Z01->Z01_MSG    := AllTrim(cMsg)   // memo - sem truncar (mensagem completa do ExecAuto)
+		Z01->Z01_QTDEMP := nEmp
+		Z01->Z01_QTDAPO := nApo
+		Z01->Z01_QTDSUB := nSub
+		Z01->Z01_DTPROC := dDataBase
+		Z01->Z01_HRPROC := Time()
+		Z01->Z01_TENTAT := Z01->Z01_TENTAT + 1
+		Z01->(MsUnlock())
+		lOk := .T.
+	Else
+		aAdd(::aErros, "Falha ao posicionar/bloquear Z01 recno=" + cValToChar(nRecno))
+	EndIf
+
+	RestArea(aArea)
+
+Return lOk
+
+/*/{Protheus.doc} RepositorioStaging:MarcarCacheIdem
+Marca um hash como ja processado no cache em memoria (idempotencia da
+fase corrente), evitando reprocessar a mesma OP duas vezes na mesma
+execucao antes do commit/leitura na Z01.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 31/05/2026
+@param cHash, Character, Hash de idempotencia da OP
+@return Nil
+/*/
+Method MarcarCacheIdem(cHash) Class RepositorioStaging
+
+	If ::oCacheIdem == Nil
+		::oCacheIdem := JsonObject():New()
+	EndIf
+
+	If !Empty(cHash)
+		::oCacheIdem[AllTrim(cHash)] := .T.
+	EndIf
+
+Return Nil
+
+/*/{Protheus.doc} RepositorioStaging:LerOPsPendentes
+Le todos os registros Z01 do lote com status "P", deserializa os 3 JSON
+e monta um array de objetos canonicos oDadosOP. Usa BeginSql para obter
+o R_E_C_N_O_ e depois dbGoto para ler os campos memo.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cLote, Character, Numero do lote a ler
+@return Array, Array de objetos oDadosOP
+/*/
+Method LerOPsPendentes(cLote) Class RepositorioStaging
+	Local aRet   := {} as array
+	Local cAlias := "" as character
+	Local aArea  := {} as array
+
+	If Empty(cLote)
+		cLote := ::cLote
+	EndIf
+
+	aArea := GetArea()
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT Z01.R_E_C_N_O_ AS RECNOZ01
+          FROM %table:Z01% Z01
+         WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+           AND Z01.Z01_LOTE   = %Exp:cLote%
+           AND Z01.Z01_STATUS = 'P'
+           AND Z01.%notDel%
+         ORDER BY Z01.Z01_OP
+	EndSql
+
+	dbSelectArea("Z01")
+	While !(cAlias)->(Eof())
+		Z01->(dbGoto((cAlias)->RECNOZ01))
+		aAdd(aRet, ::MontarODados())
+		(cAlias)->(dbSkip())
+	EndDo
+	(cAlias)->(DbCloseArea())
+
+	RestArea(aArea)
+
+Return aRet
+
+/*/{Protheus.doc} RepositorioStaging:LerOPsReprocessar
+Le todos os registros Z01 (de qualquer lote) com status IN ('E','R'),
+deserializa os 3 JSON e monta um array de objetos canonicos oDadosOP.
+Cada objeto inclui o cLote real do registro. Usado pelo PCPI003.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Array, Array de objetos oDadosOP
+/*/
+Method LerOPsReprocessar() Class RepositorioStaging
+	Local aRet   := {} as array
+	Local cAlias := "" as character
+	Local aArea  := {} as array
+
+	aArea := GetArea()
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT Z01.R_E_C_N_O_ AS RECNOZ01
+          FROM %table:Z01% Z01
+         WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+           AND Z01.Z01_STATUS IN ('E','R','P')
+           AND Z01.%notDel%
+         ORDER BY Z01.Z01_LOTE, Z01.Z01_OP
+	EndSql
+
+	dbSelectArea("Z01")
+	While !(cAlias)->(Eof())
+		Z01->(dbGoto((cAlias)->RECNOZ01))
+		aAdd(aRet, ::MontarODados())
+		(cAlias)->(dbSkip())
+	EndDo
+	(cAlias)->(DbCloseArea())
+
+	RestArea(aArea)
+
+Return aRet
+
+/*/{Protheus.doc} RepositorioStaging:ListarReprocessaveis
+Retorna um array leve (sem deserializar JSON) dos registros Z01 com
+status IN ('E','R'), para alimentar o browse do PCPI003. Cada item e
+um array simples com os dados principais e o R_E_C_N_O_.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Array, Array de arrays {cLote,cOp,cOpProt,cOrdSep,cLiga,cStatus,dDtProc,cMsg,nRecno}
+/*/
+Method ListarReprocessaveis() Class RepositorioStaging
+	Local aRet   := {} as array
+	Local cAlias := "" as character
+	Local aArea  := {} as array
+	Local nRecZ01 := 0 as numeric
+
+	aArea := fwGetArea()
+
+	dbSelectArea("Z01")
+	nRecZ01 := Z01->(Recno())
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT Z01.Z01_LOTE   AS LOTE, ;
+               Z01.Z01_OP     AS OP, ;
+               Z01.Z01_OPPROT AS OPPROT, ;
+               Z01.Z01_ORDSEP AS ORDSEP, ;
+               Z01.Z01_LIGA   AS LIGA, ;
+               Z01.Z01_STATUS AS STATUS, ;
+               Z01.Z01_DTPROC AS DTPROC, ;
+               Z01.R_E_C_N_O_ AS RECNOZ01
+          FROM %table:Z01% Z01
+         WHERE Z01.Z01_FILIAL = %xFilial:Z01%
+           AND Z01.Z01_STATUS IN ('E','R','P')
+           AND Z01.%notDel%
+         ORDER BY Z01.Z01_LOTE, Z01.Z01_OP
+	EndSql
+
+	While !(cAlias)->(Eof())
+
+		Z01->(dbGoto((cAlias)->RECNOZ01))
+
+		aAdd(aRet, { AllTrim((cAlias)->LOTE), ;
+			AllTrim((cAlias)->OP), ;
+			AllTrim((cAlias)->OPPROT), ;
+			AllTrim((cAlias)->ORDSEP), ;
+			AllTrim((cAlias)->LIGA), ;
+			AllTrim((cAlias)->STATUS), ;
+			SToD((cAlias)->DTPROC), ;
+			Z01->Z01_MSG, ;
+			(cAlias)->RECNOZ01 })
+		(cAlias)->(dbSkip())
+	EndDo
+	(cAlias)->(DbCloseArea())
+
+	//Restaura recno inicial
+	Z01->(dbGoto(nRecZ01))
+	fwRestArea(aArea)
+
+Return aRet
+
+/*/{Protheus.doc} RepositorioStaging:GetErros
+Retorna o array de erros acumulados durante as operacoes.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Array, Lista de mensagens de erro
+/*/
+Method GetErros() Class RepositorioStaging
+Return ::aErros
+
+/*/{Protheus.doc} RepositorioStaging:GetSafe
+Recupera propriedade de um JsonObject/objeto de forma segura,
+retornando o valor default quando a propriedade nao existir.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oObj, Object, Objeto fonte
+@param cChave, Character, Nome da propriedade
+@param xDefault, Variant, Valor default opcional
+@return Variant, Valor da propriedade ou default
+/*/
+Method GetSafe(oObj, cChave, xDefault) Class RepositorioStaging
+
+	If oObj != Nil .And. (ValType(oObj) == "J" .Or. ValType(oObj) == "O") .And. oObj:HasProperty(cChave)
+		Return oObj[cChave]
+	EndIf
+
+Return IIf(PCount() >= 3, xDefault, "")
+
+/*/{Protheus.doc} RepositorioStaging:MontarODados
+Com a Z01 POSICIONADA, monta o objeto canonico oDadosOP deserializando
+os 3 campos memo (JSCAB, JSEMP, JSAPO).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Object, Objeto canonico oDadosOP
+/*/
+Method MontarODados() Class RepositorioStaging
+	Local oDados := JsonObject():New() as object
+
+	oDados["cLote"]    := AllTrim(Z01->Z01_LOTE)
+	oDados["cOp"]      := AllTrim(Z01->Z01_OP)
+	oDados["cOpProt"]  := AllTrim(Z01->Z01_OPPROT)
+	oDados["cOrdSep"]  := AllTrim(Z01->Z01_ORDSEP)
+	oDados["cLiga"]    := AllTrim(Z01->Z01_LIGA)
+	oDados["cHash"]    := AllTrim(Z01->Z01_HASH)
+	oDados["cUser"]    := AllTrim(Z01->Z01_USER)
+	oDados["cUserNm"]  := AllTrim(Z01->Z01_USERNM)
+	oDados["cArquivo"] := AllTrim(Z01->Z01_ARQUIV)
+	oDados["cStatus"]  := AllTrim(Z01->Z01_STATUS)
+	oDados["oCab"]     := ::DeserializeObj(Z01->Z01_JSCAB)
+	oDados["aEmp"]     := ::DeserializeArr(Z01->Z01_JSEMP)
+	oDados["aApo"]     := ::DeserializeArr(Z01->Z01_JSAPO)
+	// C-09: RECNO como chave para atualizacao direta de status (sem dbSeek por OP/lote)
+	oDados["nRecno"]   := Z01->(Recno())
+	// A-15: preserva a OP origem ("563/26") do cabecalho quando existir;
+		// fallback para a parte numerica do Z01_OP
+	oDados["cOpOrig"]  := ::GetSafe(oDados["oCab"], "cOrdProd", AllTrim(Z01->Z01_OP))
+
+Return oDados
+
+/*/{Protheus.doc} RepositorioStaging:SerializeObj
+Serializa 1 JsonObject convertendo datas (ValType "D") para string
+DtoS (YYYYMMDD), permitindo persistir e reconstituir depois.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oObj, Object, Objeto a serializar
+@return Character, Conteudo JSON
+/*/
+Method SerializeObj(oObj) Class RepositorioStaging
+	Local oClone := Nil as object
+	Local aNomes := {} as array
+	Local nI     := 0 as numeric
+	Local cNome  := "" as character
+	Local xVal   := Nil
+
+	If oObj == Nil .Or. (ValType(oObj) != "J" .And. ValType(oObj) != "O")
+		Return "{}"
+	EndIf
+
+	oClone := JsonObject():New()
+	aNomes := oObj:GetNames()
+	For nI := 1 To Len(aNomes)
+		cNome := aNomes[nI]
+		xVal  := oObj[cNome]
+		If ValType(xVal) == "D"
+			oClone[cNome] := DtoS(xVal)   // data -> string YYYYMMDD
+		Else
+			oClone[cNome] := xVal
+		EndIf
+	Next nI
+
+Return oClone:ToJson()
+
+/*/{Protheus.doc} RepositorioStaging:SerializeArr
+Serializa um array de JsonObject envolvendo-o em um objeto com a chave
+"items". Cada item e clonado convertendo datas para string DtoS.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aArr, Array, Array de objetos a serializar
+@return Character, Conteudo JSON {"items":[...]}
+/*/
+Method SerializeArr(aArr) Class RepositorioStaging
+	Local oWrap  := JsonObject():New() as object
+	Local aItens := {} as array
+	Local oItem  := Nil as object
+	Local oClone := Nil as object
+	Local aNomes := {} as array
+	Local nI     := 0 as numeric
+	Local nJ     := 0 as numeric
+	Local cNome  := "" as character
+	Local xVal   := Nil
+
+	If ValType(aArr) != "A"
+		oWrap["items"] := {}
+		Return oWrap:ToJson()
+	EndIf
+
+	For nI := 1 To Len(aArr)
+		oItem := aArr[nI]
+		If oItem == Nil .Or. (ValType(oItem) != "J" .And. ValType(oItem) != "O")
+			Loop
+		EndIf
+		oClone := JsonObject():New()
+		aNomes := oItem:GetNames()
+		For nJ := 1 To Len(aNomes)
+			cNome := aNomes[nJ]
+			xVal  := oItem[cNome]
+			If ValType(xVal) == "D"
+				oClone[cNome] := DtoS(xVal)   // data -> string YYYYMMDD
+			Else
+				oClone[cNome] := xVal
+			EndIf
+		Next nJ
+		aAdd(aItens, oClone)
+	Next nI
+
+	oWrap["items"] := aItens
+
+Return oWrap:ToJson()
+
+/*/{Protheus.doc} RepositorioStaging:DeserializeObj
+Parseia um JSON em JsonObject e reconverte datas: qualquer chave que
+comeca com "d" e cujo valor e string de 8 digitos vira data via SToD.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cJson, Character, Conteudo JSON
+@return Object, JsonObject reconstruido
+/*/
+Method DeserializeObj(cJson) Class RepositorioStaging
+	Local oObj   := Nil as object
+	Local aNomes := {} as array
+	Local nI     := 0 as numeric
+	Local cNome  := "" as character
+	Local xVal   := Nil
+	Local cErr   := "" as character
+
+	If Empty(cJson)
+		Return JsonObject():New()
+	EndIf
+
+	oObj := JsonObject():New()
+	cErr := oObj:FromJson(cJson)
+	If !Empty(cErr)
+		Return JsonObject():New()
+	EndIf
+
+	aNomes := oObj:GetNames()
+	For nI := 1 To Len(aNomes)
+		cNome := aNomes[nI]
+		xVal  := oObj[cNome]
+		// A-10: so converte chave d* para data se for string de 8 digitos
+		// numericos E SToD gerar data valida; senao mantem como string
+		If ::EhDataStr(cNome, xVal)
+			oObj[cNome] := SToD(AllTrim(xVal))
+		EndIf
+	Next nI
+
+Return oObj
+
+/*/{Protheus.doc} RepositorioStaging:DeserializeArr
+Parseia o wrapper {"items":[...]} e retorna o array de objetos,
+reconvertendo datas em cada item (chave iniciada por "d" com valor
+string de 8 digitos vira data via SToD).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cJson, Character, Conteudo JSON {"items":[...]}
+@return Array, Array de objetos reconstruidos
+/*/
+Method DeserializeArr(cJson) Class RepositorioStaging
+	Local aRet   := {} as array
+	Local oWrap  := Nil as object
+	Local aItens := {} as array
+	Local oItem  := Nil as object
+	Local aNomes := {} as array
+	Local nI     := 0 as numeric
+	Local nJ     := 0 as numeric
+	Local cNome  := "" as character
+	Local xVal   := Nil
+	Local cErr   := "" as character
+
+	If Empty(cJson)
+		Return aRet
+	EndIf
+
+	oWrap := JsonObject():New()
+	cErr  := oWrap:FromJson(cJson)
+	If !Empty(cErr)
+		Return aRet
+	EndIf
+
+	If !oWrap:HasProperty("items")
+		Return aRet
+	EndIf
+
+	aItens := oWrap["items"]
+	If ValType(aItens) != "A"
+		Return aRet
+	EndIf
+
+	For nI := 1 To Len(aItens)
+		oItem := aItens[nI]
+		If oItem == Nil .Or. (ValType(oItem) != "J" .And. ValType(oItem) != "O")
+			Loop
+		EndIf
+		aNomes := oItem:GetNames()
+		For nJ := 1 To Len(aNomes)
+			cNome := aNomes[nJ]
+			xVal  := oItem[cNome]
+			// A-10: conversao robusta de data (mesma regra do DeserializeObj)
+			If ::EhDataStr(cNome, xVal)
+				oItem[cNome] := SToD(AllTrim(xVal))
+			EndIf
+		Next nJ
+		aAdd(aRet, oItem)
+	Next nI
+
+Return aRet
+
+/*/{Protheus.doc} RepositorioStaging:EhDataStr
+Decide se uma propriedade serializada deve ser reconvertida para data.
+So retorna .T. quando: nome inicia por "d", valor e string de exatamente
+8 caracteres todos numericos e SToD gera uma data valida (!= CtoD("")).
+Evita corromper strings de 8 chars que nao sao datas.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 31/05/2026
+@param cNome, Character, Nome da propriedade
+@param xVal, Variant, Valor serializado
+@return Logical, .T. se deve converter para data
+/*/
+Method EhDataStr(cNome, xVal) Class RepositorioStaging
+	Local cStr := "" as character
+	Local nI   := 0  as numeric
+
+	If Left(Lower(cNome), 1) != "d" .Or. ValType(xVal) != "C"
+		Return .F.
+	EndIf
+
+	cStr := AllTrim(xVal)
+	If Len(cStr) != 8
+		Return .F.
+	EndIf
+
+	// todos os 8 caracteres devem ser digitos
+	For nI := 1 To 8
+		If !IsDigit(SubStr(cStr, nI, 1))
+			Return .F.
+		EndIf
+	Next nI
+
+	// SToD deve gerar data valida (rejeita "00000000", "99999999", etc.)
+	If SToD(cStr) == CtoD("")
+		Return .F.
+	EndIf
+
+Return .T.

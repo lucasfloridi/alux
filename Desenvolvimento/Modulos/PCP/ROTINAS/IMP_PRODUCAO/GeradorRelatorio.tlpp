@@ -1,0 +1,324 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.GeradorRelatorio
+
+/*/{Protheus.doc} GeradorRelatorio
+Gera o relatorio final da importacao em XLSX (FWMsExcelXlsx) numa unica
+aba consolidada: 1 linha por OP com status/etapa/mensagem/quantidades.
+Segue o mesmo padrao de geracao do relStobagClub (Activate -> GetXMLFile
+-> DeActivate). A abertura grava no TEMP da maquina do operador
+(GetTempPath + CpyS2T) e abre no Excel para impressao, SEM dialogo.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class GeradorRelatorio
+
+    Public Data cLote      as character
+    Public Data cArqSaida  as character
+
+    Private Data oExcel    as object
+
+    Public Method New(cLote) Constructor
+    Public Method Gerar(aResultados)
+    Public Method Abrir()
+    Public Method GerarCsv(aResultados)
+
+    Private Method MontarConsolidado(aResultados)
+    Private Method DescStatus(cStatus)
+    Private Method DescEtapa(cEtapa)
+    Private Method GetTxt(oObj, cChave)
+
+EndClass
+
+/*/{Protheus.doc} GeradorRelatorio:New
+Construtor. Recebe identificacao do lote para nomear o arquivo.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cLote, Character, Numero do lote
+@return Self
+/*/
+Method New(cLote) Class GeradorRelatorio
+
+    ::cLote     := cLote
+    ::cArqSaida := ""
+    ::oExcel    := Nil
+
+Return Self
+
+/*/{Protheus.doc} GeradorRelatorio:Gerar
+Produz o XLSX consolidado (1 aba) seguindo o padrao FWMsExcelXlsx do
+relStobagClub: AddWorkSheet -> AddTable -> AddColumn -> AddRow ->
+Activate -> GetXMLFile -> DeActivate. Grava na pasta temporaria do
+servidor (GetTempPath).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param aResultados, Array, Array de objetos com OP/status/mensagem
+@return Character, Caminho do XLSX gerado
+/*/
+Method Gerar(aResultados) Class GeradorRelatorio
+Local cArquivo := "" as character
+Local cPath    := "" as character
+Local cHora    := "" as character
+
+    // MsTempPath() nao existe neste ambiente; usa GetTempPath() (que existe).
+    cPath := GetTempPath()
+    If Right(cPath, 1) != "\"
+        cPath += "\"
+    EndIf
+    cHora    := StrTran(Time(), ":", "")
+    cArquivo := cPath + "PCPI001_" + AllTrim(::cLote) + "_" + cHora + ".xlsx"
+
+    ::cArqSaida := cArquivo
+    ::oExcel    := FwMsExcelXlsx():New()
+
+    ::MontarConsolidado(aResultados)
+
+    ::oExcel:Activate()
+    ::oExcel:GetXMLFile(cArquivo)
+    ::oExcel:DeActivate()
+
+Return cArquivo
+
+/*/{Protheus.doc} GeradorRelatorio:MontarConsolidado
+Monta a aba unica "Resultado" com 1 linha por OP (todos os status).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param aResultados, Array, Array de JsonObject com resultado por OP
+@return Nil
+/*/
+Method MontarConsolidado(aResultados) Class GeradorRelatorio
+Local cAba    := "Resultado" as character
+Local cTabela := "Importacao" as character
+Local nI      := 0 as numeric
+Local nTot    := 0 as numeric
+Local oItem   := Nil as object
+
+    nTot := Len(aResultados)
+
+    ::oExcel:AddWorkSheet(cAba)
+    ::oExcel:AddTable(cAba, cTabela)
+    ::oExcel:AddColumn(cAba, cTabela, "Numero OP"      , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Ordem Separacao", 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Produto / Liga" , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Status"         , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Etapa"          , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Qtd Produzida"  , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Empenhos"       , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Apontamentos"   , 1, 1)
+    ::oExcel:AddColumn(cAba, cTabela, "Mensagem"       , 1, 1)
+
+    For nI := 1 To nTot
+        oItem := aResultados[nI]
+        If oItem == Nil .Or. (ValType(oItem) != "J" .And. ValType(oItem) != "O")
+            Loop
+        EndIf
+
+        ::oExcel:AddRow(cAba, cTabela, {;
+            ::GetTxt(oItem, "cNumOp"),;
+            ::GetTxt(oItem, "cOrdSep"),;
+            ::GetTxt(oItem, "cLigaProd"),;
+            ::DescStatus(::GetTxt(oItem, "cStatus")),;
+            ::DescEtapa(::GetTxt(oItem, "cEtapa")),;
+            ::GetTxt(oItem, "nQtdProduzida"),;
+            ::GetTxt(oItem, "nEmpenhos"),;
+            ::GetTxt(oItem, "nApontamentos"),;
+            ::GetTxt(oItem, "cMsg");
+        })
+    Next nI
+
+Return Nil
+
+/*/{Protheus.doc} GeradorRelatorio:DescStatus
+Traduz o codigo de status para um rotulo legivel.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param cStatus, Character, Codigo do status
+@return Character, Rotulo legivel
+/*/
+Method DescStatus(cStatus) Class GeradorRelatorio
+Local cRet := "" as character
+
+    Do Case
+        Case cStatus == STATUS_OK
+            cRet := "Sucesso"
+        Case cStatus == STATUS_ERRO
+            cRet := "Erro"
+        Case cStatus == STATUS_IGN
+            cRet := "Ignorada"
+        Case cStatus == STATUS_WARN
+            cRet := "Atencao"
+        Case cStatus == STATUS_PEND
+            cRet := "Alerta - Pendente saldo"
+        Case cStatus == STATUS_REPROC
+            cRet := "Reprocessar"
+        Otherwise
+            cRet := cStatus
+    EndCase
+
+Return cRet
+
+/*/{Protheus.doc} GeradorRelatorio:DescEtapa
+Traduz o codigo de etapa para um rotulo legivel.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param cEtapa, Character, Codigo da etapa
+@return Character, Rotulo legivel
+/*/
+Method DescEtapa(cEtapa) Class GeradorRelatorio
+Local cRet := "" as character
+
+    Do Case
+        Case cEtapa == ETAPA_LEIT
+            cRet := "Leitura"
+        Case cEtapa == ETAPA_VALID
+            cRet := "Validacao"
+        Case cEtapa == ETAPA_OP
+            cRet := "Ordem de Producao"
+        Case cEtapa == ETAPA_EMPENHO
+            cRet := "Empenho"
+        Case cEtapa == ETAPA_APONT
+            cRet := "Apontamento"
+        Case cEtapa == ETAPA_RELAT
+            cRet := "Relatorio"
+        Otherwise
+            cRet := cEtapa
+    EndCase
+
+Return cRet
+
+/*/{Protheus.doc} GeradorRelatorio:Abrir
+Grava o XLSX no TEMP da maquina do operador e abre no Excel para
+impressao, SEM nenhum dialogo. GetTempPath(.T.) resolve o temp do
+CLIENTE; o CpyS2T baixa o arquivo do servidor para essa pasta e o
+ShellExecute abre. Em contexto blind/job apenas loga no servidor.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Nil
+/*/
+Method Abrir() Class GeradorRelatorio
+Local cTempCli := "" as character
+Local cNomeArq := "" as character
+Local nPos     := 0  as numeric
+
+    If Empty(::cArqSaida) .or. !File(::cArqSaida)
+        Return Nil
+    EndIf
+
+    // Em ambiente blind/job nao abre no client (so loga o caminho no servidor)
+    If Type("oMainWnd") != "O"
+        ConOut("[PCPI001] Relatorio gerado em " + ::cArqSaida)
+        Return Nil
+    EndIf
+
+    // Nome do arquivo (cFileName nao existe neste ambiente - extrai via RAt)
+    nPos     := Max(RAt("\", ::cArqSaida), RAt("/", ::cArqSaida))
+    cNomeArq := IIf(nPos > 0, SubStr(::cArqSaida, nPos + 1), ::cArqSaida)
+
+    // TEMP da maquina do operador (CLIENTE): GetTempPath(.T.) - a 1a flag .T.
+    // resolve o temp do client (ex. C:\Users\<user>\AppData\Local\Temp). Baixa o
+    // XLSX do servidor para la (CpyS2T) e abre - assim funciona tambem com client
+    // REMOTO (server != client). Se nao conseguir baixar, abre direto o do
+    // servidor (fallback p/ ambiente local, onde client == server).
+    cTempCli := GetTempPath(.T., .F.)
+    If !Empty(cTempCli) .And. Right(cTempCli, 1) != "\"
+        cTempCli += "\"
+    EndIf
+
+    // If !Empty(cTempCli) .And. CpyS2T(::cArqSaida, cTempCli)
+    //     ShellExecute("Open", cTempCli + cNomeArq, "", "", 1)
+    // Else
+        ShellExecute("Open", ::cArqSaida, "", "", 1)
+    // EndIf
+
+Return Nil
+
+/*/{Protheus.doc} GeradorRelatorio:GerarCsv
+Gera um CSV (CP1252, delimitador ";") com TODOS os resultados consolidados
+(1 linha por OP). Grava na pasta PATH_AUX do servidor via fCreate/fWrite.
+Backup/diagnostico caso o XLSX nao possa ser aberto no client.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param aResultados, Array, Resultados consolidados
+@return Character, Caminho do CSV gerado (vazio se falhar)
+/*/
+Method GerarCsv(aResultados) Class GeradorRelatorio
+Local cArquivo  := "" as character
+Local cConteudo := "" as character
+Local cMsg      := "" as character
+Local oR        := Nil as object
+Local nI        := 0  as numeric
+Local nHandle   := 0  as numeric
+
+    cArquivo := PATH_AUX + "PCPI001_resultado_" + AllTrim(::cLote) + ".csv"
+
+    cConteudo := "NUMOP;ORDEM_SEP;PRODUTO;STATUS;ETAPA;QTD_PRODUZIDA;EMPENHOS;APONTAMENTOS;MENSAGEM" + CRLF
+
+    For nI := 1 To Len(aResultados)
+        oR   := aResultados[nI]
+        cMsg := ::GetTxt(oR, "cMsg")
+        cMsg := StrTran(cMsg, ";", ",")
+        cMsg := StrTran(cMsg, Chr(13), " ")
+        cMsg := StrTran(cMsg, Chr(10), " ")
+
+        cConteudo += ::GetTxt(oR, "cNumOp")        + ";" + ;
+                     ::GetTxt(oR, "cOrdSep")       + ";" + ;
+                     ::GetTxt(oR, "cLigaProd")     + ";" + ;
+                     ::DescStatus(::GetTxt(oR, "cStatus")) + ";" + ;
+                     ::DescEtapa(::GetTxt(oR, "cEtapa"))   + ";" + ;
+                     ::GetTxt(oR, "nQtdProduzida") + ";" + ;
+                     ::GetTxt(oR, "nEmpenhos")     + ";" + ;
+                     ::GetTxt(oR, "nApontamentos") + ";" + ;
+                     cMsg + CRLF
+    Next nI
+
+    // Grava no servidor (fCreate/fWrite existem neste ambiente - usados pelo ZLC)
+    nHandle := fCreate(cArquivo)
+    If nHandle >= 0
+        fWrite(nHandle, cConteudo)
+        fClose(nHandle)
+    Else
+        cArquivo := ""
+    EndIf
+
+Return cArquivo
+
+/*/{Protheus.doc} GeradorRelatorio:GetTxt
+Acesso seguro a uma propriedade de um JsonObject, devolvendo a representacao
+textual (AllTrim + cValToChar) ou "" quando ausente.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oObj, Object, JsonObject de origem
+@param cChave, Character, Nome da propriedade
+@return Character, Texto ou ""
+/*/
+Method GetTxt(oObj, cChave) Class GeradorRelatorio
+Local cRet := "" as character
+
+    // JsonObject tem ValType "J" (nao "O") - aceita ambos por seguranca
+    If oObj != Nil .And. (ValType(oObj) == "J" .Or. ValType(oObj) == "O") .And. oObj:HasProperty(cChave)
+        cRet := AllTrim(cValToChar(oObj[cChave]))
+    EndIf
+
+Return cRet

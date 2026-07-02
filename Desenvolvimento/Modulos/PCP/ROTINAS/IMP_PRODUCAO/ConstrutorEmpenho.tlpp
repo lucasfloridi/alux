@@ -1,0 +1,517 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "topconn.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ConstrutorEmpenho
+
+/*/{Protheus.doc} ConstrutorEmpenho
+Cria empenhos manuais (SD4) na OP via MATA381 ExecAuto.
+Recebe um numero de OP e uma lista de consumos (linhas filtradas
+do apontamento_rotativo) e gera 1 SD4 por consumo.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class ConstrutorEmpenho
+
+	Private Data cUltimoErro  as character
+	Private Data nUltimaSeq   as numeric
+	Private Data nQtdCriados  as numeric
+	Private Data lHouveFalha  as logical
+	Public  Data cInfoExcl    as character
+	Public  Data aCoprodutos  as array
+
+	Public Method New() Constructor
+	Public Method CriarEmpenhos(cNumOp, aConsumos, dDtMov, cProdutoSB1)
+	Public Method CriarEmpenhoUnitario(cNumOp, oConsumo, nSeqLog, aCriados, dDtMov, cProdutoSB1)
+	Public Method ExcluirEmpenhosOP(cOpCompleto)
+	Public Method ContarEmpenhos(cOpCompleto)
+	Public Method AgregarConsumos(aConsumos)
+	Public Method GetLocal(cProduto)
+	Public Method GetUltimoErro()
+	Public Method GetUltimaSeq()
+	Public Method GetQtdCriados()
+	Public Method GetHouveFalha()
+
+EndClass
+
+/*/{Protheus.doc} ConstrutorEmpenho:New
+Construtor. Inicializa estado interno da classe.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Self
+/*/
+Method New() Class ConstrutorEmpenho
+
+	::cUltimoErro := ""
+	::nUltimaSeq  := 0
+	::nQtdCriados := 0
+	::lHouveFalha := .F.
+	::cInfoExcl   := ""
+	::aCoprodutos := {}
+
+Return Self
+
+/*/{Protheus.doc} ConstrutorEmpenho:CriarEmpenhos
+Itera uma lista de consumos e cria 1 SD4 para cada via MATA381.
+Retorna um array com os empenhos criados com sucesso para que o
+apontamento (AUTCONSUMO) possa consumi-los pelo D3_TRT (=D4_TRT).
+Cada item do array e um array {cCod, cTrt, nQtd, cLocal, cOp}.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cNumOp, Character, Numero da OP (C2_NUM zero-padded)
+@param aConsumos, Array, Lista de objetos com (cod_sucata, qtd, etc.)
+@return Array, Empenhos criados {cCod, cTrt, nQtd, cLocal, cOp}
+/*/
+Method CriarEmpenhos(cNumOp, aConsumos, dDtMov, cProdutoSB1) Class ConstrutorEmpenho
+	Local nI          := 0   as numeric
+	Local nTotal      := 0   as numeric
+	Local oCons       := Nil as object
+	Local cOpCompleto := ""  as character
+	Local aCriados    := {}  as array
+
+	Default dDtMov      := dDataBase
+	Default cProdutoSB1 := ""
+
+	::cUltimoErro := ""
+	::nQtdCriados := 0
+	::lHouveFalha := .F.
+	::nUltimaSeq  := 0
+	::aCoprodutos := {}
+	cOpCompleto   := OP_COMPLETA(cNumOp)
+
+	// Agrega por produto (soma qtd, inclusive negativos). O MATA381 usa o
+	// D4_TRT = sequencia da estrutura do produto; 2 linhas do mesmo produto na
+	// planilha colidiriam (MA380JACAD). Um empenho por produto resolve.
+	aConsumos := ::AgregarConsumos(aConsumos)
+	nTotal    := Len(aConsumos)
+
+	// A exclusao dos empenhos pre-existentes e feita no ProcessadorOP, ANTES
+	// desta chamada e FORA da transacao (via ExecAuto), para enxergar/commitar.
+
+	ConOut("[PCPI] CriarEmpenhos OP=" + AllTrim(cOpCompleto) + " produtos(agregados)=" + cValToChar(nTotal))
+
+	// TODOS os consumos viram empenho (SD4), inclusive os de quantidade
+	// NEGATIVA (co-produto/retorno) - o negativo grava negativo no empenho, e
+	// o backflush trata como ENTRADA. Cada empenho leva o D4_PRODUTO = produto
+	// PAI da OP, para o backflush achar e baixar automaticamente, sem TM (igual
+	// a OP que deu certo: Produto Pai preenchido, operacao vazia).
+	For nI := 1 To nTotal
+		oCons := aConsumos[nI]
+
+		If !::CriarEmpenhoUnitario(cNumOp, oCons, nI, @aCriados, dDtMov, cProdutoSB1)
+			::lHouveFalha := .T.
+			Exit
+		EndIf
+	Next nI
+
+	::nQtdCriados := Len(aCriados)
+
+Return aCriados
+
+/*/{Protheus.doc} ConstrutorEmpenho:CriarEmpenhoUnitario
+Cria 1 SD4 individual via MATA381 (inclusao). Quando criado com
+sucesso, adiciona em aCriados (por referencia) o array
+{cCod, cTrt, nQtd, cLocal, cOp} para uso posterior no AUTCONSUMO.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cNumOp, Character, Numero da OP (C2_NUM zero-padded)
+@param oConsumo, Object, JsonObject com cCodSucata e nQtd
+@param nSeqLog, Numeric, Sequencial do log (linha do apontamento)
+@param aCriados, Array, Lista acumuladora de empenhos criados (por referencia)
+@param dDtMov, Date, Data de movimento do empenho
+@param cProdutoSB1, Character, Produto PAI da OP (D4_PRODUTO - liga o empenho ao backflush)
+@return Logical, .T. se o empenho foi criado
+/*/
+Method CriarEmpenhoUnitario(cNumOp, oConsumo, nSeqLog, aCriados, dDtMov, cProdutoSB1) Class ConstrutorEmpenho
+	Local aCabEmp    := {} as array
+	Local aItensEmp  := {} as array
+	Local aItem      := {} as array
+	Local cOpComplet := "" as character
+	Local cCodSucata := "" as character
+	Local nQtd       := 0  as numeric
+	Local cLocal     := "" as character
+	Local cSeq       := "" as character
+	Local aLog       := {} as array
+	Local cMsgErro   := "" as character
+	Local cTrtReal   := "" as character
+	Local nI         := 0  as numeric
+	Local dDtBaseAnt := dDataBase as date
+	Private lAutoErrNoFile := .T.
+	Private lMsErroAuto    := .F.
+
+	Default dDtMov      := dDataBase
+	Default cProdutoSB1 := ""
+
+	::cUltimoErro := "" // zera erro do unitario anterior
+
+	If aCriados == Nil
+		aCriados := {}
+	EndIf
+
+	cOpComplet := OP_COMPLETA(cNumOp)
+
+	// Guard HasProperty para evitar type mismatch em chave ausente
+	If (ValType(oConsumo) == "J" .Or. ValType(oConsumo) == "O") .And. oConsumo:HasProperty("cCodSucata")
+		cCodSucata := AllTrim(oConsumo["cCodSucata"])
+	EndIf
+	If (ValType(oConsumo) == "J" .Or. ValType(oConsumo) == "O") .And. oConsumo:HasProperty("nQtd")
+		nQtd := oConsumo["nQtd"]
+	EndIf
+
+	// Quantidade negativa e valida (co-produto/retorno). Bloqueia apenas
+	// codigo vazio ou quantidade zero (sem movimento).
+	If Empty(cCodSucata) .Or. nQtd == 0
+		::cUltimoErro := "Consumo invalido (cod vazio ou qtd zero)"
+		Return .F.
+	EndIf
+
+	cLocal := ::GetLocal(cCodSucata)
+	::nUltimaSeq++
+	cSeq := StrZero(::nUltimaSeq, 4)
+
+	aCabEmp := {{"D4_OP", cOpComplet, Nil}}
+
+	aItem := {}
+	aAdd(aItem, {"D4_FILIAL" , xFilial("SD4"), Nil})
+	aAdd(aItem, {"D4_OP"     , cOpComplet    , Nil})
+	aAdd(aItem, {"D4_COD"    , cCodSucata    , Nil})
+	aAdd(aItem, {"D4_TRT"    , cSeq          , Nil})
+	aAdd(aItem, {"D4_LOCAL"  , cLocal        , Nil})
+	aAdd(aItem, {"D4_QUANT"  , nQtd          , Nil})
+	aAdd(aItem, {"D4_QTDEORI", nQtd          , Nil})
+	aAdd(aItem, {"D4_DATA"   , dDtMov        , Nil})
+	// D4_PRODUTO = produto PAI da OP (ALIN017-00). E o que faltava: o backflush
+	// (A250Atu) so reconhece o empenho como pertencente a producao da OP se o
+	// D4_PRODUTO bater com o produto produzido. Sem ele o empenho fica pendente
+	// -> A250NOENC. A operacao (D4_OPERAC) fica VAZIA, igual a OP que deu certo
+	// (o consumo casa por OP + Produto Pai, nao por operacao).
+	If !Empty(cProdutoSB1)
+		aAdd(aItem, {"D4_PRODUTO", cProdutoSB1, Nil})
+	EndIf
+
+	aItensEmp := {aItem}
+
+	// Altera a data base do sistema para a data de movimento do empenho
+	// (data de emissao da OP); restaura logo apos o ExecAuto.
+	dDtBaseAnt := dDataBase
+	dDataBase  := dDtMov
+
+	MSExecAuto({|x,y,z| MATA381(x,y,z)}, aCabEmp, aItensEmp, 3)
+
+	dDataBase := dDtBaseAnt
+
+	If lMsErroAuto
+		aLog     := GetAutoGRLog()
+		cMsgErro := ""
+		For nI := 1 To Len(aLog)
+			cMsgErro += aLog[nI] + CRLF
+		Next nI
+		If Empty(cMsgErro)
+			cMsgErro := "Erro nao identificado MATA381 (seq " + cValToChar(nSeqLog) + ")"
+		EndIf
+		::cUltimoErro := cMsgErro
+		Return .F.
+	EndIf
+
+	// Le o D4_TRT REAL gravado (o MATA381 pode usar a sequencia da estrutura,
+	// nao a minha cSeq). O AUTCONSUMO liga o consumo a este D4_TRT.
+	// IMPORTANTE: dbSelectArea NAO reposiciona o cursor; o SD4 pode nao estar
+	// no registro recem-incluido. So leio o D4_TRT se o cursor estiver
+	// CONFIRMADO no empenho criado (mesmo OP + COD); senao uso a cSeq passada
+	// (que o MATA381 honra para empenho manual). TRT errado faz o AUTCONSUMO
+	// nao baixar o empenho -> A250NOENC no encerramento.
+	cTrtReal := cSeq
+	dbSelectArea("SD4")
+	If AllTrim(SD4->D4_OP) == AllTrim(cOpComplet) .And. AllTrim(SD4->D4_COD) == AllTrim(cCodSucata)
+		If !Empty(AllTrim(SD4->D4_TRT))
+			cTrtReal := AllTrim(SD4->D4_TRT)
+		EndIf
+	EndIf
+
+	// Registra o empenho criado para consumo posterior (AUTCONSUMO via D3_TRT)
+	aAdd(aCriados, {cCodSucata, cTrtReal, nQtd, cLocal, cOpComplet})
+
+Return .T.
+
+/*/{Protheus.doc} ConstrutorEmpenho:ExcluirEmpenhosOP
+Exclui TODOS os empenhos (SD4) ja existentes na OP (estrutura explodida
+ou empenho anterior) via ExecAuto MATA381 (nOpcAuto = 5), para o sistema
+tratar todos os efeitos colaterais (saldo empenhado, reservas, lote).
+Garante que o empenho fique exatamente igual a planilha. O padrao faz o
+mesmo (ver MATI650: "utilizar EXECAUTO do MATA381, sempre excluindo o que
+ja existir cadastrado na SD4").
+
+Antes de excluir, guarda o maior D4_TRT em ::nUltimaSeq para que os novos
+empenhos continuem a sequencia - evita colisao (MA380JACAD) com os
+registros recem excluidos, que o indice de unicidade ainda pode enxergar
+dentro da mesma transacao.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 11/06/2026
+@param cOpCompleto, Character, OP completa (numero + item + sequencia)
+@return Numeric, Quantidade de empenhos excluidos
+/*/
+Method ExcluirEmpenhosOP(cOpCompleto) Class ConstrutorEmpenho
+	Local nExcl   := 0  as numeric
+	Local nMaxTrt := 0  as numeric
+	Local aArea   := {} as array
+	Local aRecnos := {} as array
+	Local aCab    := {} as array
+	Local aItens  := {} as array
+	Local aItem   := {} as array
+	Local aLog    := {} as array
+	Local cMsg    := "" as character
+	Local cAlias  := "" as character
+	Local cFalhas := "" as character
+	Local cCodDel := "" as character
+	Local cTrtDel := "" as character
+	Local cMsgErr1 := "" as character
+	Local nI      := 0  as numeric
+	Local nJ      := 0  as numeric
+	Private lAutoErrNoFile := .T.
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+
+	::cInfoExcl := ""
+	aArea := GetArea()
+
+	// 1. Localiza os empenhos da OP via SQL (independe de indice da SD4) e
+	// coleta R_E_C_N_O_ + maior D4_TRT (anti-colisao na recriacao).
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+		SELECT SD4.R_E_C_N_O_ AS RECSD4, SD4.D4_TRT AS TRT
+		  FROM %table:SD4% SD4
+		 WHERE SD4.D4_FILIAL = %xFilial:SD4%
+		   AND SD4.D4_OP      = %Exp:cOpCompleto%
+		   AND SD4.%notDel%
+	EndSql
+
+	While !(cAlias)->(Eof())
+		nMaxTrt := Max(nMaxTrt, Val((cAlias)->TRT))
+		aAdd(aRecnos, (cAlias)->RECSD4)
+		(cAlias)->(dbSkip())
+	EndDo
+	(cAlias)->(DbCloseArea())
+
+	// novos empenhos continuam a partir do maior TRT existente
+	::nUltimaSeq := nMaxTrt
+
+	ConOut("[PCPI] ExcluirEmpenhosOP OP=" + AllTrim(cOpCompleto) + " encontrados=" + cValToChar(Len(aRecnos)))
+
+	// 2. Exclui cada empenho via MATA381 (nOpc 5) com o SD4 posicionado pelo recno.
+	// NAO aborta na 1a falha (um empenho problematico nao pode impedir os demais).
+	dbSelectArea("SD4")
+	For nI := 1 To Len(aRecnos)
+		SD4->(dbGoto(aRecnos[nI]))
+		If SD4->(Eof()) .Or. SD4->(Deleted())
+			Loop
+		EndIf
+		// le os dados ANTES do ExecAuto (o MATA381 reposiciona a SD4)
+		cCodDel := AllTrim(SD4->D4_COD)
+		cTrtDel := AllTrim(SD4->D4_TRT)
+		lMsErroAuto := .F.
+
+		aCab  := {{"D4_OP", SD4->D4_OP, Nil}}
+		aItem := {}
+		aAdd(aItem, {"D4_COD"   , SD4->D4_COD   , Nil})
+		aAdd(aItem, {"D4_TRT"   , SD4->D4_TRT   , Nil})
+		aAdd(aItem, {"D4_LOCAL" , SD4->D4_LOCAL , Nil})
+		aAdd(aItem, {"D4_QUANT" , SD4->D4_QUANT , Nil})
+		aItens := {aItem}
+
+		MSExecAuto({|x,y,z| MATA381(x,y,z)}, aCab, aItens, 5) // 5 = exclusao
+
+		If lMsErroAuto
+			aLog := GetAutoGRLog()
+			cMsg := ""
+			For nJ := 1 To Len(aLog)
+				cMsg += AllTrim(aLog[nJ]) + " "
+			Next nJ
+			cMsg := AllTrim(cMsg)
+			cFalhas += cCodDel + "/" + cTrtDel + " "
+			If Empty(cMsgErr1)
+				cMsgErr1 := cMsg   // guarda o motivo do 1o erro do MATA381
+			EndIf
+			ConOut("[PCPI] Falha excluir COD=" + cCodDel + " TRT=" + cTrtDel + ": " + cMsg)
+		Else
+			nExcl++
+		EndIf
+	Next nI
+
+	::cInfoExcl := "EXCL[ach=" + cValToChar(Len(aRecnos)) + " exc=" + cValToChar(nExcl) + ;
+		IIf(!Empty(cFalhas), " FALHA:" + AllTrim(cFalhas) + " MSG:" + cMsgErr1, "") + "]"
+	ConOut("[PCPI] ExcluirEmpenhosOP OP=" + AllTrim(cOpCompleto) + " " + ::cInfoExcl)
+
+	RestArea(aArea)
+
+Return nExcl
+
+/*/{Protheus.doc} ConstrutorEmpenho:ContarEmpenhos
+Conta os empenhos (SD4) ja existentes na OP (nao deletados). Usado pelo
+ProcessadorOP para NAO recriar o empenho no reprocesso: se ja existe (criado
+na 1a importacao), segue direto para o apontamento da operacao pendente -
+evita MA380JACAD (duplicado) e a exclusao de empenho ja baixado (MA381EMPBX).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 17/06/2026
+@param cOpCompleto, Character, OP completa (numero + item + sequencia)
+@return Numeric, Quantidade de empenhos existentes na SD4
+/*/
+Method ContarEmpenhos(cOpCompleto) Class ConstrutorEmpenho
+	Local cAlias := "" as character
+	Local nQtd   := 0  as numeric
+
+	cAlias := GetNextAlias()
+	BeginSql Alias cAlias
+        SELECT COUNT(*) AS QTD
+          FROM %table:SD4% SD4
+         WHERE SD4.D4_FILIAL = %xFilial:SD4%
+           AND SD4.D4_OP     = %Exp:cOpCompleto%
+           AND SD4.%notDel%
+	EndSql
+
+	nQtd := IIf(!(cAlias)->(Eof()), (cAlias)->QTD, 0)
+	(cAlias)->(DbCloseArea())
+
+Return nQtd
+
+/*/{Protheus.doc} ConstrutorEmpenho:AgregarConsumos
+Agrega os consumos por produto (cCodSucata), somando as quantidades
+(positivas e negativas). Necessario porque o MATA381 usa o D4_TRT =
+sequencia da estrutura do produto - logo so pode existir 1 empenho por
+produto na OP; varias linhas do mesmo produto colidem (MA380JACAD). A
+soma com sinal preserva a regra do negativo (retorno).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 11/06/2026
+@param aConsumos, Array, Consumos da planilha (JsonObject com cCodSucata, nQtd)
+@return Array, Consumos agregados (1 por produto)
+/*/
+Method AgregarConsumos(aConsumos) Class ConstrutorEmpenho
+	Local aRet   := {}  as array
+	Local oHash  := JsonObject():New() as object
+	Local aNomes := {}  as array
+	Local oItem  := Nil as object
+	Local oNovo  := Nil as object
+	Local cCod   := ""  as character
+	Local nQtd   := 0   as numeric
+	Local nI     := 0   as numeric
+
+	For nI := 1 To Len(aConsumos)
+		oItem := aConsumos[nI]
+		cCod  := ""
+		nQtd  := 0
+		If ValType(oItem) == "J" .Or. ValType(oItem) == "O"
+			If oItem:HasProperty("cCodSucata")
+				cCod := AllTrim(cValToChar(oItem["cCodSucata"]))
+			EndIf
+			If oItem:HasProperty("nQtd")
+				nQtd := oItem["nQtd"]
+			EndIf
+		EndIf
+		If Empty(cCod)
+			Loop
+		EndIf
+
+		If oHash:HasProperty(cCod)
+			oHash[cCod]["nQtd"] := oHash[cCod]["nQtd"] + nQtd
+		Else
+			oNovo := JsonObject():New()
+			oNovo["cCodSucata"] := cCod
+			oNovo["nQtd"]       := nQtd
+			oHash[cCod]         := oNovo
+		EndIf
+	Next nI
+
+	aNomes := oHash:GetNames()
+	For nI := 1 To Len(aNomes)
+		aAdd(aRet, oHash[aNomes[nI]])
+	Next nI
+
+Return aRet
+
+/*/{Protheus.doc} ConstrutorEmpenho:GetLocal
+Busca o armazem padrao (B1_LOCPAD) do produto na SB1.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cProduto, Character, Codigo do produto (B1_COD)
+@return Character, Armazem padrao ou vazio
+/*/
+Method GetLocal(cProduto) Class ConstrutorEmpenho
+	Local cLocal := "" as character
+	Local aArea  := {} as array
+
+	aArea := GetArea()
+
+	dbSelectArea("SB1")
+	SB1->(dbSetOrder(1))
+	If SB1->(dbSeek(xFilial("SB1") + cProduto))
+		cLocal := SB1->B1_LOCPAD
+	EndIf
+
+	RestArea(aArea)
+
+Return cLocal
+
+/*/{Protheus.doc} ConstrutorEmpenho:GetUltimoErro
+Retorna o ultimo erro registrado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Character, Log do erro
+/*/
+Method GetUltimoErro() Class ConstrutorEmpenho
+Return ::cUltimoErro
+
+/*/{Protheus.doc} ConstrutorEmpenho:GetUltimaSeq
+Retorna o ultimo sequencial de empenho (D4_TRT) gerado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Numeric, Ultimo sequencial usado
+/*/
+Method GetUltimaSeq() Class ConstrutorEmpenho
+Return ::nUltimaSeq
+
+/*/{Protheus.doc} ConstrutorEmpenho:GetQtdCriados
+Retorna a quantidade de empenhos criados com sucesso na ultima
+chamada de CriarEmpenhos.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Numeric, Quantidade de empenhos criados
+/*/
+Method GetQtdCriados() Class ConstrutorEmpenho
+Return ::nQtdCriados
+
+/*/{Protheus.doc} ConstrutorEmpenho:GetHouveFalha
+Indica se houve falha na criacao de algum empenho na ultima chamada
+de CriarEmpenhos. Permite ao chamador abortar a OP em vez de seguir
+com consumo incompleto.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 31/05/2026
+@return Logical, .T. se algum empenho falhou
+/*/
+Method GetHouveFalha() Class ConstrutorEmpenho
+Return ::lHouveFalha

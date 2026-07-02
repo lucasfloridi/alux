@@ -1,0 +1,764 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "fileio.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.LeitorPlanilha
+
+/*/{Protheus.doc} LeitorPlanilha
+Le arquivos CSV de movimento retornando array de objetos linha.
+Trata conversao de tipos (datas, horas, numericos com virgula
+decimal, texto com caracteres invalidos). Motor de leitura por
+texto (FWFileReader) pois FwXlsxUtil nao existe na 12.1.2410.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class LeitorPlanilha
+
+    Public Data aErros   as array
+
+    Public Method New() Constructor
+    Public Method Ler(cArquivo, cTipo)
+    Public Method ConverterData(xVal)
+    Public Method ConverterHora(xVal)
+    Public Method ConverterNum(xVal)
+    Public Method NormalizarTexto(cVal)
+    Public Method GetErros()
+
+    Private Method LerLinhas(cArquivo)
+    Private Method DetectaDelim(cLinha)
+    Private Method SplitCsv(cLinha, cDelim)
+    Private Method ParseHeader(aHeaderRow)
+    Private Method LinhaVazia(aLinha)
+    Private Method MontarLinha(aColunas, oHeader, cTipo)
+    Private Method SafeCol(aColunas, nIdx)
+    Private Method ColPorNome(oHeader, cNome)
+    Private Method TiraAcento(cVal)
+
+EndClass
+
+/*/{Protheus.doc} LeitorPlanilha:New
+Construtor. Inicializa estado interno.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Self
+/*/
+Method New() Class LeitorPlanilha
+
+    ::aErros := {}
+
+Return Self
+
+/*/{Protheus.doc} LeitorPlanilha:GetErros
+Retorna o array interno de erros acumulados pela instancia.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Array, Lista de mensagens de erro
+/*/
+Method GetErros() Class LeitorPlanilha
+Return ::aErros
+
+/*/{Protheus.doc} LeitorPlanilha:Ler
+Le um arquivo CSV e retorna array de objetos linha.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cArquivo, Character, Caminho do CSV
+@param cTipo, Character, Tipo de planilha (PRODUCAO, OPERACAO, MATERIA_PRIMA)
+@return Array, Array de objetos com as linhas lidas
+/*/
+Method Ler(cArquivo, cTipo) Class LeitorPlanilha
+Local aLinhas     := {}  as array
+Local aRaw        := {}  as array
+Local aColunas    := {}  as array
+Local aHeaderCols := {}  as array
+Local cDelim      := ""  as character
+Local nI          := 0   as numeric
+Local nQtdLin     := 0   as numeric
+Local nQtdHeader  := 0   as numeric
+Local oHeader     := Nil as object
+Local oLinha      := Nil as object
+
+    // 1. Valida existencia do arquivo
+    If !File(cArquivo)
+        aAdd(::aErros, "Arquivo nao encontrado: " + cArquivo)
+        Return aLinhas
+    EndIf
+
+    // 2. Le todas as linhas de texto do CSV
+    // M-17: o limite de 50000 e aplicado DENTRO de LerLinhas (corte cedo);
+    // o erro ja e registrado la quando o arquivo excede o limite.
+    aRaw := ::LerLinhas(cArquivo)
+
+    nQtdLin := Len(aRaw)
+    If nQtdLin > 50000
+        Return aLinhas
+    EndIf
+    If nQtdLin < 2
+        // So tem cabecalho ou esta vazio
+        Return aLinhas
+    EndIf
+
+    // 3. Detecta delimitador pela linha de cabecalho
+    cDelim := ::DetectaDelim(aRaw[1])
+
+    // 4. Le cabecalho (linha 1) e monta mapa nome -> indice
+    aHeaderCols := ::SplitCsv(aRaw[1], cDelim)
+    nQtdHeader  := Len(aHeaderCols)
+    oHeader     := ::ParseHeader(aHeaderCols)
+
+    // 5. Itera linhas de dados (a partir da 2)
+    For nI := 2 To nQtdLin
+        aColunas := ::SplitCsv(aRaw[nI], cDelim)
+
+        If ::LinhaVazia(aColunas)
+            Loop
+        EndIf
+
+        // A-13: avisa (sem abortar) linha com numero de colunas != cabecalho
+        If Len(aColunas) != nQtdHeader
+            aAdd(::aErros, "Linha " + cValToChar(nI) + " com " + ;
+                cValToChar(Len(aColunas)) + " colunas (esperado " + ;
+                cValToChar(nQtdHeader) + ")")
+        EndIf
+
+        oLinha := ::MontarLinha(aColunas, oHeader, cTipo)
+        If oLinha != Nil
+            aAdd(aLinhas, oLinha)
+        EndIf
+    Next nI
+
+Return aLinhas
+
+/*/{Protheus.doc} LeitorPlanilha:LerLinhas
+Le todas as linhas do arquivo texto. Usa FWFileReader (nativa
+12.1.2410). Em caso de falha de abertura, registra erro e retorna
+array vazio.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cArquivo, Character, Caminho do arquivo
+@return Array, Array de strings (uma por linha)
+/*/
+Method LerLinhas(cArquivo) Class LeitorPlanilha
+Local aRet     := {}  as array
+Local oReader  := Nil as object
+Local cLinha   := ""  as character
+Local lPrimLin := .T. as logical
+
+    oReader := FWFileReader():New(cArquivo)
+
+    If !oReader:Open()
+        aAdd(::aErros, "Falha ao abrir o arquivo: " + cArquivo)
+        Return aRet
+    EndIf
+
+    // M-13: garante Close mesmo em excecao durante a leitura
+    Begin Sequence
+        While oReader:HasLine()
+            cLinha := oReader:GetLine()
+            // Remove CR residual (arquivos com CRLF)
+            cLinha := StrTran(cLinha, Chr(13), "")
+
+            // C-02: remove BOM UTF-8 da 1a linha (Excel BR exporta com BOM)
+            If lPrimLin
+                If Left(cLinha, 3) == (Chr(239) + Chr(187) + Chr(191))
+                    cLinha := SubStr(cLinha, 4)
+                EndIf
+                lPrimLin := .F.
+            EndIf
+
+            aAdd(aRet, cLinha)
+
+            // M-17: corta cedo arquivos gigantes (nao carrega o resto)
+            If Len(aRet) > 50000
+                aAdd(::aErros, "Arquivo excede limite de 50000 linhas")
+                Exit
+            EndIf
+        EndDo
+    Recover
+        aAdd(::aErros, "Falha durante a leitura do arquivo: " + cArquivo)
+    End Sequence
+
+    If oReader != Nil
+        oReader:Close()
+    EndIf
+
+Return aRet
+
+/*/{Protheus.doc} LeitorPlanilha:DetectaDelim
+Auto-detecta o delimitador na linha de cabecalho. Conta ocorrencias
+de ";" e ",": se houver mais ";" usa ";", senao ",". Fallback para
+CSV_DELIM se nenhum aparecer.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cLinha, Character, Linha de cabecalho
+@return Character, Delimitador detectado
+/*/
+Method DetectaDelim(cLinha) Class LeitorPlanilha
+Local cRet     := CSV_DELIM as character
+Local nPontoVi := 0         as numeric
+Local nVirgula := 0         as numeric
+
+    If cLinha == Nil .or. ValType(cLinha) != "C"
+        Return cRet
+    EndIf
+
+    nPontoVi := Len(cLinha) - Len(StrTran(cLinha, ";", ""))
+    nVirgula := Len(cLinha) - Len(StrTran(cLinha, ",", ""))
+
+    If nPontoVi > 0 .or. nVirgula > 0
+        If nPontoVi >= nVirgula
+            cRet := ";"
+        Else
+            cRet := ","
+        EndIf
+    EndIf
+
+Return cRet
+
+/*/{Protheus.doc} LeitorPlanilha:SplitCsv
+Quebra uma linha CSV em array de campos pelo delimitador,
+preservando campos vazios entre delimitadores consecutivos.
+Remove aspas duplas que envolvem os campos.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cLinha, Character, Linha do CSV
+@param cDelim, Character, Delimitador
+@return Array, Campos da linha
+/*/
+Method SplitCsv(cLinha, cDelim) Class LeitorPlanilha
+Local aRet   := {} as array
+Local cAtual := "" as character
+Local cChar  := "" as character
+Local nI     := 0  as numeric
+Local nTam   := 0  as numeric
+
+    If cLinha == Nil .or. ValType(cLinha) != "C"
+        Return aRet
+    EndIf
+
+    // Split manual preservando campos vazios ("a;;c" -> {"a","","c"})
+    nTam := Len(cLinha)
+    For nI := 1 To nTam
+        cChar := SubStr(cLinha, nI, 1)
+        If cChar == cDelim
+            aAdd(aRet, cAtual)
+            cAtual := ""
+        Else
+            cAtual += cChar
+        EndIf
+    Next nI
+    // Ultimo campo (apos o ultimo delimitador)
+    aAdd(aRet, cAtual)
+
+    // Remove aspas duplas envolventes de cada campo
+    nTam := Len(aRet)
+    For nI := 1 To nTam
+        cAtual := AllTrim(aRet[nI])
+        If Len(cAtual) >= 2 .and. Left(cAtual, 1) == '"' .and. Right(cAtual, 1) == '"'
+            cAtual := SubStr(cAtual, 2, Len(cAtual) - 2)
+        EndIf
+        aRet[nI] := cAtual
+    Next nI
+
+Return aRet
+
+/*/{Protheus.doc} LeitorPlanilha:ConverterData
+Converte um valor (string vinda do CSV) em tipo Date do ADVPL.
+Trata "DD/MM/AAAA", "AAAA-MM-DD" e "DD/MM/AAAA HH:MM:SS".
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param xVal, Variant, Valor a converter
+@return Date, Data convertida ou CToD("  /  /    ") se invalido
+/*/
+Method ConverterData(xVal) Class LeitorPlanilha
+Local dRet      := CToD("  /  /    ") as date
+Local cTipo     := ""                 as character
+Local cVal      := ""                 as character
+Local nLen      := 0                  as numeric
+Local nDia      := 0                  as numeric
+Local nMes      := 0                  as numeric
+Local nAno      := 0                  as numeric
+Local lParecData := .F.               as logical
+
+    If xVal == Nil
+        Return dRet
+    EndIf
+
+    cTipo := ValType(xVal)
+
+    Do Case
+    Case cTipo == "D"
+        dRet := xVal
+
+    Case cTipo == "C"
+        cVal := AllTrim(xVal)
+        nLen := Len(cVal)
+
+        If nLen >= 10
+            // Tenta DD/MM/AAAA com parse posicional (independe de SET DATE)
+            // Cobre tambem "DD/MM/AAAA HH:MM:SS" (usa os 10 primeiros)
+            If SubStr(cVal, 3, 1) == "/" .and. SubStr(cVal, 6, 1) == "/"
+                lParecData := .T.
+                nDia := Val(SubStr(cVal, 1, 2))
+                nMes := Val(SubStr(cVal, 4, 2))
+                nAno := Val(SubStr(cVal, 7, 4))
+                If nDia >= 1 .and. nDia <= 31 .and. nMes >= 1 .and. nMes <= 12 .and. nAno > 1900
+                    dRet := SToD(StrZero(nAno, 4) + StrZero(nMes, 2) + StrZero(nDia, 2))
+                EndIf
+            EndIf
+        EndIf
+
+        // Se nao bateu, tenta AAAA-MM-DD nos 10 primeiros
+        If Empty(dRet) .and. nLen >= 10
+            If SubStr(cVal, 5, 1) == "-" .and. SubStr(cVal, 8, 1) == "-"
+                lParecData := .T.
+                nAno := Val(SubStr(cVal, 1, 4))
+                nMes := Val(SubStr(cVal, 6, 2))
+                nDia := Val(SubStr(cVal, 9, 2))
+                If nDia >= 1 .and. nDia <= 31 .and. nMes >= 1 .and. nMes <= 12 .and. nAno > 1900
+                    dRet := SToD(StrZero(nAno, 4) + StrZero(nMes, 2) + StrZero(nDia, 2))
+                EndIf
+            EndIf
+        EndIf
+
+        // M-14: parecia data valida mas SToD nao converteu -> loga (sem abortar)
+        If lParecData .and. Empty(dRet)
+            aAdd(::aErros, "Data invalida: " + cVal)
+        EndIf
+    EndCase
+
+Return dRet
+
+/*/{Protheus.doc} LeitorPlanilha:ConverterHora
+Converte um valor (string vinda do CSV) para "HH:MM". Extrai a hora
+de "HH:MM", "HH:MM:SS" ou "DD/MM/AAAA HH:MM:SS".
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param xVal, Variant, Valor a converter
+@return Character, Hora no formato "HH:MM" ou "00:00" se invalido
+/*/
+Method ConverterHora(xVal) Class LeitorPlanilha
+Local cRet  := "00:00" as character
+Local cTipo := ""      as character
+Local cVal  := ""      as character
+Local nLen  := 0       as numeric
+Local nHh   := 0       as numeric
+Local nMm   := 0       as numeric
+Local nPos  := 0       as numeric
+
+    If xVal == Nil
+        Return cRet
+    EndIf
+
+    cTipo := ValType(xVal)
+
+    Do Case
+    Case cTipo == "D"
+        // Date puro nao carrega hora -> retorna default
+        cRet := "00:00"
+
+    Case cTipo == "C"
+        cVal := AllTrim(xVal)
+        nLen := Len(cVal)
+
+        If nLen == 0
+            cRet := "00:00"
+
+        ElseIf nLen >= 5 .and. SubStr(cVal, 3, 1) == ":"
+            // Ja esta em HH:MM ou HH:MM:SS -> trunca para HH:MM
+            nHh := Val(SubStr(cVal, 1, 2))
+            nMm := Val(SubStr(cVal, 4, 2))
+
+        ElseIf nLen >= 4 .and. SubStr(cVal, 2, 1) == ":"
+            // H:MM -> normaliza para HH:MM
+            nHh := Val(SubStr(cVal, 1, 1))
+            nMm := Val(SubStr(cVal, 3, 2))
+
+        Else
+            // Tenta extrair HH:MM ao redor do primeiro ":" (ex "DD/MM/AAAA HH:MM:SS")
+            nPos := At(":", cVal)
+            If nPos >= 3 .and. nPos <= nLen - 2
+                nHh := Val(SubStr(cVal, nPos - 2, 2))
+                nMm := Val(SubStr(cVal, nPos + 1, 2))
+            EndIf
+        EndIf
+
+        // A-11: valida HH (0..23) e MM (0..59); invalido -> "00:00"
+        If nHh >= 0 .and. nHh <= 23 .and. nMm >= 0 .and. nMm <= 59
+            cRet := StrZero(nHh, 2) + ":" + StrZero(nMm, 2)
+        Else
+            cRet := "00:00"
+        EndIf
+    EndCase
+
+Return cRet
+
+/*/{Protheus.doc} LeitorPlanilha:ConverterNum
+Converte string com virgula decimal ou ponto em numerico.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param xVal, Variant, Valor a converter
+@return Numeric, Valor numerico ou 0 se invalido
+/*/
+Method ConverterNum(xVal) Class LeitorPlanilha
+Local nRet  := 0  as numeric
+Local cTipo := "" as character
+Local cVal  := "" as character
+
+    If xVal == Nil
+        Return nRet
+    EndIf
+
+    cTipo := ValType(xVal)
+
+    Do Case
+    Case cTipo == "N"
+        nRet := xVal
+
+    Case cTipo == "C"
+        cVal := AllTrim(xVal)
+        cVal := StrTran(cVal, " ", "")
+        If !Empty(cVal)
+            // M-02: premissa - export Excel BR usa "," decimal e "." milhar.
+            // Regra unificada com RepositorioAuxiliares:ConverterNum.
+            If "," $ cVal
+                // formato BR: "." e milhar, "," e decimal (ex 1.234,56)
+                cVal := StrTran(cVal, ".", "")
+                cVal := StrTran(cVal, ",", ".")
+            EndIf
+            // Se so tem ".", deixa como esta (assume decimal) - premissa documentada
+            nRet := Val(cVal)
+        EndIf
+    EndCase
+
+Return nRet
+
+/*/{Protheus.doc} LeitorPlanilha:NormalizarTexto
+Trim + remocao de caracteres invalidos / acentos.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cVal, Character, Texto de entrada
+@return Character, Texto normalizado
+/*/
+Method NormalizarTexto(cVal) Class LeitorPlanilha
+Local cRet  := "" as character
+Local cTipo := "" as character
+Local nLen  := 0  as numeric
+
+    If cVal == Nil
+        Return cRet
+    EndIf
+
+    cTipo := ValType(cVal)
+    If cTipo != "C"
+        Return cRet
+    EndIf
+
+    cRet := AllTrim(cVal)
+
+    // Remove quebras de linha
+    cRet := StrTran(cRet, Chr(13), " ")
+    cRet := StrTran(cRet, Chr(10), " ")
+    cRet := StrTran(cRet, Chr(9), " ")
+
+    // Colapsa espacos duplicados
+    nLen := 0
+    While Len(cRet) != nLen
+        nLen := Len(cRet)
+        cRet := StrTran(cRet, "  ", " ")
+    EndDo
+
+    // Remove acentos
+    cRet := ::TiraAcento(cRet)
+
+Return cRet
+
+// --------------------------------------------------------------------------
+// METODOS PRIVADOS AUXILIARES
+// --------------------------------------------------------------------------
+
+/*/{Protheus.doc} LeitorPlanilha:TiraAcento
+Substitui caracteres acentuados por equivalentes ASCII.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param cVal, Character, Texto de entrada
+@return Character, Texto sem acentos
+/*/
+Method TiraAcento(cVal) Class LeitorPlanilha
+Static aMapCache := Nil
+Local cRet := "" as character
+Local nI   := 0  as numeric
+Local nTam := 0  as numeric
+
+    If cVal == Nil .or. ValType(cVal) != "C"
+        Return cRet
+    EndIf
+
+    If aMapCache == Nil
+        aMapCache := {;
+            {Chr(225), "a"}, {Chr(224), "a"}, {Chr(227), "a"}, {Chr(226), "a"}, {Chr(228), "a"},;
+            {Chr(193), "A"}, {Chr(192), "A"}, {Chr(195), "A"}, {Chr(194), "A"}, {Chr(196), "A"},;
+            {Chr(233), "e"}, {Chr(232), "e"}, {Chr(234), "e"}, {Chr(235), "e"},;
+            {Chr(201), "E"}, {Chr(200), "E"}, {Chr(202), "E"}, {Chr(203), "E"},;
+            {Chr(237), "i"}, {Chr(236), "i"}, {Chr(238), "i"}, {Chr(239), "i"},;
+            {Chr(205), "I"}, {Chr(204), "I"}, {Chr(206), "I"}, {Chr(207), "I"},;
+            {Chr(243), "o"}, {Chr(242), "o"}, {Chr(245), "o"}, {Chr(244), "o"}, {Chr(246), "o"},;
+            {Chr(211), "O"}, {Chr(210), "O"}, {Chr(213), "O"}, {Chr(212), "O"}, {Chr(214), "O"},;
+            {Chr(250), "u"}, {Chr(249), "u"}, {Chr(251), "u"}, {Chr(252), "u"},;
+            {Chr(218), "U"}, {Chr(217), "U"}, {Chr(219), "U"}, {Chr(220), "U"},;
+            {Chr(231), "c"}, {Chr(199), "C"},;
+            {Chr(241), "n"}, {Chr(209), "N"};
+        }
+    EndIf
+
+    cRet := cVal
+    nTam := Len(aMapCache)
+    For nI := 1 To nTam
+        cRet := StrTran(cRet, aMapCache[nI, 1], aMapCache[nI, 2])
+    Next nI
+
+    // Remove caracteres de controle Chr(0)..Chr(31), preservando tab/lf/cr
+    For nI := 0 To 31
+        If nI != 9 .and. nI != 10 .and. nI != 13
+            cRet := StrTran(cRet, Chr(nI), "")
+        EndIf
+    Next nI
+
+Return cRet
+
+/*/{Protheus.doc} LeitorPlanilha:ParseHeader
+Recebe a primeira linha do CSV (ja quebrada em array) e devolve
+JsonObject com mapa nome_coluna (UPPER + trim) -> indice (1-based).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aHeaderRow, Array, Campos da linha 1 do CSV
+@return oMap, JsonObject, Mapa nome -> indice
+/*/
+Method ParseHeader(aHeaderRow) Class LeitorPlanilha
+Local oMap  := Nil as object
+Local nI    := 0   as numeric
+Local nTam  := 0   as numeric
+Local cNome := ""  as character
+Local xVal  := Nil as variant
+
+    oMap := JsonObject():New()
+    nTam := Len(aHeaderRow)
+
+    For nI := 1 To nTam
+        xVal := aHeaderRow[nI]
+        If xVal == Nil
+            Loop
+        EndIf
+        If ValType(xVal) != "C"
+            Loop
+        EndIf
+        cNome := Upper(AllTrim(xVal))
+        If !Empty(cNome)
+            oMap[cNome] := nI
+        EndIf
+    Next nI
+
+Return oMap
+
+/*/{Protheus.doc} LeitorPlanilha:LinhaVazia
+Retorna .T. se todos os campos da linha forem Nil ou vazios.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aLinha, Array, Campos da linha
+@return lRet, Logical
+/*/
+Method LinhaVazia(aLinha) Class LeitorPlanilha
+Local lRet  := .T. as logical
+Local nI    := 0   as numeric
+Local nTam  := 0   as numeric
+Local xVal  := Nil as variant
+Local cTipo := ""  as character
+
+    If aLinha == Nil
+        Return .T.
+    EndIf
+
+    nTam := Len(aLinha)
+    For nI := 1 To nTam
+        xVal := aLinha[nI]
+        If xVal == Nil
+            Loop
+        EndIf
+        cTipo := ValType(xVal)
+        Do Case
+        Case cTipo == "C"
+            If !Empty(AllTrim(xVal))
+                lRet := .F.
+                Exit
+            EndIf
+        Case cTipo == "N"
+            If xVal != 0
+                lRet := .F.
+                Exit
+            EndIf
+        Case cTipo == "D"
+            If !Empty(xVal)
+                lRet := .F.
+                Exit
+            EndIf
+        Otherwise
+            lRet := .F.
+            Exit
+        EndCase
+    Next nI
+
+Return lRet
+
+/*/{Protheus.doc} LeitorPlanilha:SafeCol
+Acesso seguro a um campo da linha por indice.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aColunas, Array, Campos da linha
+@param nIdx, Numeric, Indice (1-based) da coluna
+@return Variant, Conteudo do campo ou Nil
+/*/
+Method SafeCol(aColunas, nIdx) Class LeitorPlanilha
+Local xRet := Nil as variant
+
+    If nIdx == Nil .or. nIdx <= 0
+        Return xRet
+    EndIf
+    If aColunas == Nil
+        Return xRet
+    EndIf
+    If nIdx > Len(aColunas)
+        Return xRet
+    EndIf
+
+    xRet := aColunas[nIdx]
+
+Return xRet
+
+/*/{Protheus.doc} LeitorPlanilha:ColPorNome
+Resolve a coluna pelo nome usando o JsonObject de cabecalho.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oHeader, JsonObject, Mapa nome -> indice
+@param cNome, Character, Nome da coluna esperada
+@return Numeric, Indice (1-based) ou 0 se nao achou
+/*/
+Method ColPorNome(oHeader, cNome) Class LeitorPlanilha
+Local nIdx   := 0  as numeric
+Local cChave := "" as character
+
+    If oHeader == Nil .or. cNome == Nil
+        Return nIdx
+    EndIf
+
+    cChave := Upper(AllTrim(cNome))
+
+    If oHeader:HasProperty(cChave)
+        // Acesso por indice (oHeader[cChave]); GetJsonObject nao devolve o numerico
+        nIdx := oHeader[cChave]
+        If ValType(nIdx) != "N"
+            nIdx := 0
+        EndIf
+    EndIf
+
+Return nIdx
+
+/*/{Protheus.doc} LeitorPlanilha:MontarLinha
+Constroi JsonObject de uma linha de dados aplicando os conversores
+de acordo com cTipo.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param aColunas, Array, Campos da linha de dados
+@param oHeader, JsonObject, Mapa nome -> indice
+@param cTipo, Character, Tipo da planilha
+@return oRet, JsonObject, Linha normalizada
+/*/
+Method MontarLinha(aColunas, oHeader, cTipo) Class LeitorPlanilha
+Local oRet := Nil as object
+
+    oRet := JsonObject():New()
+
+    Do Case
+    Case cTipo == "MATERIA_PRIMA"
+        // t_materia_primas -> consumo/empenho (MATA381). Mantem cCodSucata/nQtd
+        // para reaproveitar o ConstrutorEmpenho sem alteracao.
+        oRet["cOrdProd"]   := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "ORDEM_PRODUCAO")))
+        oRet["cOrdSep"]    := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "ORDEM_SEPARACAO")))
+        oRet["cCodSucata"] := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "CODIGO")))
+        oRet["nQtd"]       := ::ConverterNum(::SafeCol(aColunas, ::ColPorNome(oHeader, "QUANTIDADE")))
+        oRet["dHora"]      := ::ConverterData(::SafeCol(aColunas, ::ColPorNome(oHeader, "HORA")))
+        oRet["cHora"]      := ::ConverterHora(::SafeCol(aColunas, ::ColPorNome(oHeader, "HORA")))
+        oRet["cMovimento"] := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "MOVIMENTO")))
+        oRet["cMatPrima"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "MATERIA_PRIMA2")))
+        oRet["cPaid"]      := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "__POWERAPPSID__")))
+
+    Case cTipo == "PRODUCAO"
+        // t_producao -> cabecalho da OP (MATA650). Produto EXPLICITO (codigo) e
+        // roteiro EXPLICITO - sem mapeamento de liga.
+        oRet["cOrdProd"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "ORDEM_PRODUCAO")))
+        oRet["cProduto"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "CODIGO")))
+        oRet["cLigaProd"] := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "LIGA_PRODUZIDA")))
+        oRet["nQtdProd"]  := ::ConverterNum(::SafeCol(aColunas, ::ColPorNome(oHeader, "QUANTIDADE")))
+        oRet["dInicio"]   := ::ConverterData(::SafeCol(aColunas, ::ColPorNome(oHeader, "PREVISAO_INICIO")))
+        oRet["dFim"]      := ::ConverterData(::SafeCol(aColunas, ::ColPorNome(oHeader, "ENTREGA")))
+        oRet["dEmissao"]  := ::ConverterData(::SafeCol(aColunas, ::ColPorNome(oHeader, "DT_EMISSAO")))
+        oRet["cRoteiro"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "ROTEIRO")))
+        oRet["cPaid"]     := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "__POWERAPPSID__")))
+
+    Case cTipo == "OPERACAO"
+        // t_operacao -> apontamento Mod2 POR OPERACAO (MATA681). operacao e
+        // recurso EXPLICITOS - sem lookup na SG2.
+        oRet["cOrdProd"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "ORDEM_PRODUCAO")))
+        oRet["cOrdSep"]   := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "ORDEM_SEPARACAO")))
+        oRet["cOperacao"] := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "OPERACAO")))
+        oRet["cProduto"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "CODIGO")))
+        oRet["cLigaProd"] := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "LIGA_PRODUZIDA")))
+        oRet["nQtd"]      := ::ConverterNum(::SafeCol(aColunas, ::ColPorNome(oHeader, "QUANTIDADE")))
+        oRet["dDataIni"]  := ::ConverterData(::SafeCol(aColunas, ::ColPorNome(oHeader, "DATA_INICIO")))
+        oRet["cHoraIni"]  := ::ConverterHora(::SafeCol(aColunas, ::ColPorNome(oHeader, "HORA_INICIO")))
+        oRet["dDataFim"]  := ::ConverterData(::SafeCol(aColunas, ::ColPorNome(oHeader, "DATA_FINAL")))
+        oRet["cHoraFim"]  := ::ConverterHora(::SafeCol(aColunas, ::ColPorNome(oHeader, "HORA_FINAL")))
+        oRet["cRecurso"]  := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "RECURSO")))
+        oRet["cPaid"]     := ::NormalizarTexto(::SafeCol(aColunas, ::ColPorNome(oHeader, "__POWERAPPSID__")))
+
+    Otherwise
+        aAdd(::aErros, "Tipo de planilha desconhecido: " + cTipo)
+        oRet := Nil
+    EndCase
+
+Return oRet

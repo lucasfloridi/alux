@@ -1,0 +1,77 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.PCPI001
+
+using namespace Alux.PCP.ImportadorApontamento
+using namespace Alux.PCP.SelecaoArquivos
+
+/*/{Protheus.doc} PCPI001
+Entry point da rotina de importacao de apontamento de producao - SIGAPCP.
+
+Le 3 arquivos CSV (movimento) e cria OP/empenho/apontamento no Protheus:
+  - t_producao.csv       (cabecalho da OP  -> SC2 via MATA650)
+  - t_operacao.csv       (apontamento Mod2 -> SH6 via MATA681, 1 por operacao)
+  - t_materia_primas.csv (consumo/empenho  -> SD4 via MATA381)
+
+Produto, roteiro, operacao e recurso vem EXPLICITOS nos arquivos. Sem
+tabelas auxiliares (RM/REVISAO2).
+
+@type    User Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   29/05/2026
+@version 12.1.2410
+@return  Nil
+/*/
+User Function PCPI001()
+	Local cArqProducao := "" as character
+	Local cArqOperacao := "" as character
+	Local cArqMatPrima := "" as character
+	Local cHabIMP      := "" as character
+	Local oCtrl        := Nil as object
+	Local oSel         := Nil as object
+	Local aArqs        := {} as array
+
+	cHabIMP := AllTrim(Upper(cValToChar(SuperGetMv("AL_PCPIMOP", .F., "N"))))
+	If cHabIMP != "S"
+		FWAlertWarning("Rotina desabilitada. Parametro AL_PCPIMOP deve estar como 'S'.", "PCPI001")
+		Return Nil
+	EndIf
+
+	// Tela unica de selecao dos 3 arquivos de movimento (grid + acoes)
+	oSel  := SelecaoArquivos():New()
+	aArqs := oSel:Selecionar()
+
+	If Empty(aArqs) .Or. Len(aArqs) < 3
+		Return Nil
+	EndIf
+
+	cArqProducao := aArqs[1]
+	cArqOperacao := aArqs[2]
+	cArqMatPrima := aArqs[3]
+
+	Processa({|| ExecutaImport(cArqProducao, cArqOperacao, cArqMatPrima, @oCtrl) }, ;
+		"Importando apontamento de producao...", "Aguarde...")
+
+Return Nil
+
+/*/{Protheus.doc} ExecutaImport
+Wrapper Static para execucao dentro do Processa().
+
+@type    Static Function
+@author  Leonardo Barboza Ribeiro Leite
+@since   29/05/2026
+@param   cArqProducao, Character, Caminho t_producao.csv
+@param   cArqOperacao, Character, Caminho t_operacao.csv
+@param   cArqMatPrima, Character, Caminho t_materia_primas.csv
+@param   oCtrl,        Object,    Controller (por referencia)
+@return  Nil
+/*/
+Static Function ExecutaImport(cArqProducao, cArqOperacao, cArqMatPrima, oCtrl)
+
+	oCtrl := ImportadorApontamento():New(cArqProducao, cArqOperacao, cArqMatPrima)
+	oCtrl:Executar()
+
+Return Nil

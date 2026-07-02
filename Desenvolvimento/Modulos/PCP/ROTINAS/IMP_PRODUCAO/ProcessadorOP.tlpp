@@ -1,0 +1,539 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ProcessadorOP
+
+using namespace Alux.PCP.ConstrutorApontamento
+using namespace Alux.PCP.ConstrutorEmpenho
+using namespace Alux.PCP.ConstrutorOP
+
+/*/{Protheus.doc} ProcessadorOP
+Processa UMA OP do novo modelo: cria a OP (SC2 via MATA650 com produto e
+roteiro EXPLICITOS), os empenhos (SD4 via MATA381) e os apontamentos por
+operacao (SH6 via MATA681, 1 por operacao do t_operacao). Recebe um
+JsonObject oDadosOP ja deserializado e devolve um JsonObject de resultado.
+
+Modelo transacional:
+  - OP em transacao ISOLADA: se criada, e commitada e NAO estorna depois.
+  - Empenho + apontamento em 2a transacao: se falhar, estorna ambos, mas a
+    OP permanece.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class ProcessadorOP
+
+    Public Data cUltimoErro as character
+
+    Private Data oConstOP   as object
+    Private Data oConstEmp  as object
+    Private Data oConstApon as object
+
+    Public  Method New() Constructor
+    Public  Method Processar(oDadosOP)
+    Public  Method GetUltimoErro()
+
+    Private Method Falha(oRet, cEtapa, cMsg, cOpProt)
+    Private Method ValidarProdutos(cProdutoSB1, aEmp)
+    Private Method ChecarSB1(cProd, cDesc, oVistos)
+    Private Method ValidarSaldo(aEmp, aSemSaldo)
+    Private Method GetSafe(oObj, cChave, xDefault)
+
+EndClass
+
+/*/{Protheus.doc} ProcessadorOP:New
+Construtor. Instancia os construtores (OP, empenho, apontamento).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@return Self
+/*/
+Method New() Class ProcessadorOP
+
+    ::cUltimoErro := ""
+    ::oConstOP    := ConstrutorOP():New()
+    ::oConstEmp   := ConstrutorEmpenho():New()
+    ::oConstApon  := ConstrutorApontamento():New()
+
+Return Self
+
+/*/{Protheus.doc} ProcessadorOP:Processar
+Processa uma unica OP. Produto vem explicito (oCab["cProduto"]); cada
+linha do t_operacao vira 1 apontamento Mod2. O consumo dos empenhos
+(AUTCONSUMO) entra na operacao que produz (qtd > 0).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oDadosOP, Object, JsonObject com cOpOrig, oCab, aEmp, aApo
+@return Object, JsonObject com cStatus, cEtapa, cMsg, cOpProt, nEmp, nApo, nSub, lOk
+/*/
+Method Processar(oDadosOP) Class ProcessadorOP
+    Local oRet         := Nil as object
+    Local oCab         := Nil as object
+    Local aEmp         := {} as array
+    Local aApo         := {} as array
+    Local aEmpCriados  := {} as array
+    Local cProdutoSB1  := "" as character
+    Local cNumOp       := "" as character
+    Local cMsgProd     := "" as character
+    Local cMsgSaldo    := "" as character
+    Local aSemSaldo    := {} as array
+    Local nEmpCriados  := 0 as numeric
+    Local nEmpExist    := 0 as numeric
+    Local nApoCriados  := 0 as numeric
+    Local nQtdProd     := 0 as numeric
+    Local nIdxConsumo  := 0 as numeric
+    Local nJ           := 0 as numeric
+    Local dDtMov       := dDataBase as date
+    Local lOk          := .F. as logical
+    Local lAbortar     := .F. as logical
+    Local lOpCriada    := .F. as logical
+    Local cStatus      := "" as character
+    Local cEtapa       := "" as character
+    Local cMsg         := "" as character
+    Local oApt         := Nil as object
+    Local oErr         := Nil as object
+    Private lMsErroAuto := .F.
+    Private lMsHelpAuto := .T.
+
+    ::cUltimoErro := ""
+    oRet    := JsonObject():New()
+    cStatus := STATUS_OK
+    cEtapa  := ETAPA_OP
+
+    oCab := oDadosOP["oCab"]
+    aEmp := oDadosOP["aEmp"]
+    aApo := oDadosOP["aApo"]
+
+    // Data de movimento da OP (dt_emissao; fallback previsao_inicio): usada
+    // como data base na criacao da OP e dos empenhos.
+    dDtMov := dDataBase
+    If ::GetSafe(oCab, "dEmissao", Nil) != Nil .And. ValType(::GetSafe(oCab, "dEmissao", Nil)) == "D" .And. !Empty(::GetSafe(oCab, "dEmissao", Nil))
+        dDtMov := oCab["dEmissao"]
+    ElseIf ::GetSafe(oCab, "dInicio", Nil) != Nil .And. ValType(::GetSafe(oCab, "dInicio", Nil)) == "D" .And. !Empty(::GetSafe(oCab, "dInicio", Nil))
+        dDtMov := oCab["dInicio"]
+    EndIf
+
+    // 1. Produto EXPLICITO (sem mapeamento de liga)
+    cProdutoSB1 := AllTrim(cValToChar(::GetSafe(oCab, "cProduto", "")))
+    If Empty(cProdutoSB1)
+        Return ::Falha(oRet, ETAPA_VALID, "Produto (codigo) nao informado no t_producao", "")
+    EndIf
+
+    // 2. Numero OP Protheus
+    cNumOp := ::oConstOP:FormatarNumOp(::GetSafe(oDadosOP, "cOpOrig", ::GetSafe(oCab, "cOrdProd", "")), dDtMov)
+    If Empty(cNumOp)
+        Return ::Falha(oRet, ETAPA_VALID, "Numero de OP invalido", "")
+    EndIf
+
+    // 3. Pre-validacao de produtos (antes dos ExecAuto): produto da OP +
+    // componentes do empenho. Existir em SB1 e nao bloqueado.
+    cMsgProd := ::ValidarProdutos(cProdutoSB1, aEmp)
+    If !Empty(cMsgProd)
+        Return ::Falha(oRet, ETAPA_VALID, "Produto(s) invalido(s): " + cMsgProd, cNumOp)
+    EndIf
+
+    // 4. Operacao que PRODUZ e ENCERRA a OP: a que tem qtd > 0 (H6_PT = "T");
+    // se nenhuma tiver qtd > 0, a ultima operacao. O backflush dessa operacao
+    // consome os empenhos da OP (por OP + Produto Pai) ANTES do encerramento
+    // (A250Atu roda antes do A250End), entao a OP encerra sem A250NOENC - tudo
+    // no mesmo apontamento, sem TM.
+    For nJ := 1 To Len(aApo)
+        If ::GetSafe(aApo[nJ], "nQtd", 0) > 0
+            nIdxConsumo := nJ
+            Exit
+        EndIf
+    Next nJ
+    If nIdxConsumo == 0
+        nIdxConsumo := Len(aApo)
+    EndIf
+
+    // 5. TRANSACAO 1 - OP (isolada). Se criada aqui, e commitada e NAO estorna.
+    If ::oConstOP:Existe(cNumOp)
+        If ::oConstOP:EstaFechada(cNumOp)
+            oRet["lOk"]     := .F.
+            oRet["cStatus"] := STATUS_IGN
+            oRet["cEtapa"]  := ETAPA_OP
+            oRet["cMsg"]    := "OP ja encerrada no Protheus"
+            oRet["cOpProt"] := cNumOp
+            oRet["nEmp"]    := 0
+            oRet["nApo"]    := 0
+            oRet["nSub"]    := 0
+            ::cUltimoErro   := oRet["cMsg"]
+            Return oRet
+        ElseIf AllTrim(::oConstOP:GetProdutoOP(cNumOp)) != AllTrim(cProdutoSB1)
+            Return ::Falha(oRet, ETAPA_OP, "OP existente com produto divergente (esperado " + ;
+                AllTrim(cProdutoSB1) + ", encontrado " + AllTrim(::oConstOP:GetProdutoOP(cNumOp)) + ")", cNumOp)
+        EndIf
+        // OP existe, aberta, produto compativel -> reusa
+    Else
+        nQtdProd := ::GetSafe(oCab, "nQtdProd", 0)
+        If nQtdProd <= 0
+            Return ::Falha(oRet, ETAPA_OP, "Quantidade da OP invalida (nQtdProd <= 0)", cNumOp)
+        EndIf
+        // Leva a ordem de separacao (canonica = Z01_ORDSEP) para o cabecalho,
+        // para o ConstrutorOP gravar no C2_OBS da OP (o t_producao nao traz esse
+        // campo - ele vem do t_operacao via oDadosOP["cOrdSep"]).
+        If ValType(oCab) == "J" .Or. ValType(oCab) == "O"
+            oCab["cOrdSep"] := ::GetSafe(oDadosOP, "cOrdSep", ::GetSafe(oCab, "cOrdSep", ""))
+        EndIf
+        Begin Transaction
+            cNumOp := ::oConstOP:Criar(oCab, cProdutoSB1, nQtdProd)
+            If Empty(cNumOp)
+                cMsg := "Falha ao criar OP: " + ::oConstOP:GetUltimoErro()
+                DisarmTransaction()
+            Else
+                lOpCriada := .T.
+            EndIf
+        End Transaction
+        If !lOpCriada
+            Return ::Falha(oRet, ETAPA_OP, cMsg, "")
+        EndIf
+    EndIf
+
+    // 5b. Validacao de SALDO dos componentes (apenas qtd POSITIVA; negativos sao
+    // retorno/co-produto). aSemSaldo = itens sem saldo. Os empenhos (SD4) sao
+    // criados para TODOS os itens (inclusive os sem saldo, que ficam reservados
+    // aguardando entrada de estoque). aSemSaldo serve para NAO apontar/encerrar a
+    // OP enquanto faltar saldo (o backflush nao consome sem estoque) - a OP fica
+    // pendente de entrada de estoque e e reprocessada depois.
+    cMsgSaldo := ::ValidarSaldo(aEmp, @aSemSaldo)
+
+    // 6. EMPENHO. IDEMPOTENTE: se a OP JA tem empenho na SD4 (reprocesso - os
+    // empenhos foram criados na 1a importacao), NAO recria. Recriar daria
+    // MA380JACAD (empenho duplicado) e o ExcluirEmpenhosOP falharia com empenhos
+    // ja baixados (MA381EMPBX). Nesse caso segue direto para o apontamento -
+    // que, via JaApontada, faz so a operacao TOTAL que ficou pendente.
+    cEtapa     := ETAPA_EMPENHO
+    nEmpExist  := ::oConstEmp:ContarEmpenhos(OP_COMPLETA(cNumOp))
+    If nEmpExist > 0
+        nEmpCriados := nEmpExist   // empenhos ja prontos - reaproveita
+    Else
+        // 1a vez: exclui residuo pre-existente (FORA da transacao, enxerga/commita
+        // os SD4) e cria os empenhos da planilha. cProdutoSB1 = produto PAI ->
+        // D4_PRODUTO de cada empenho (liga ao backflush).
+        ::oConstEmp:ExcluirEmpenhosOP(OP_COMPLETA(cNumOp))
+        Begin Transaction
+            Try
+                aEmpCriados := ::oConstEmp:CriarEmpenhos(cNumOp, aEmp, dDtMov, cProdutoSB1)
+                nEmpCriados := Len(aEmpCriados)
+                If ::oConstEmp:GetHouveFalha()
+                    cMsg     := "Falha ao criar empenho(s): " + ::oConstEmp:GetUltimoErro() + " | " + ::oConstEmp:cInfoExcl
+                    lAbortar := .T.
+                EndIf
+            Catch oErr
+                cMsg     := "Erro interno na criacao de empenho" + IIf(oErr != Nil, ": " + cValToChar(oErr:Description), "")
+                lAbortar := .T.
+            EndTry
+            If lAbortar
+                DisarmTransaction()
+                nEmpCriados := 0
+            EndIf
+        End Transaction
+    EndIf
+
+    If lAbortar
+        // Empenho falhou: empenhos ja estornados pelo DisarmTransaction.
+        // Rollback da OP via ExecAuto (so a criada por esta rotina).
+        cStatus := STATUS_ERRO
+        If lOpCriada
+            If ::oConstOP:ExcluirOP(cNumOp)
+                cMsg += " | OP " + AllTrim(cNumOp) + " EXCLUIDA (rollback)."
+            Else
+                cMsg += " | ATENCAO: falha ao excluir a OP " + AllTrim(cNumOp) + " - " + ::oConstOP:GetUltimoErro()
+            EndIf
+        Else
+            cMsg += " | OP preexistente mantida."
+        EndIf
+    Else
+        // 7. APONTAMENTO. Aponta as operacoes. Quando FALTA saldo, aponta SO as
+        // PARCIAIS (sem qtd) e PULA a operacao TOTAL (a que produz/consome/encerra)
+        // - essa fica para o apontamento MANUAL quando o estoque entrar. Com todos
+        // os itens com saldo, aponta tudo (a total faz backflush + encerra).
+        cEtapa := ETAPA_APONT
+        Begin Transaction
+            Try
+                For nJ := 1 To Len(aApo)
+                    oApt := aApo[nJ]
+                    // Falta saldo -> pula a operacao TOTAL (nIdxConsumo); aponta so
+                    // as parciais (qtd 0, que nao consomem estoque).
+                    If Len(aSemSaldo) > 0 .And. nJ == nIdxConsumo
+                        Loop
+                    EndIf
+                    // dDtMov = data da OP -> data base de todos os movimentos do
+                    // MATA681 (evita mao de obra com data de hoje -> A250VerReq).
+                    // Apontar e idempotente: pula operacao ja apontada (reprocesso).
+                    lOk := ::oConstApon:Apontar(oApt, cNumOp, cProdutoSB1, {}, ::GetSafe(oCab, "nQtdProd", 0), {}, dDtMov)
+                    If !lOk
+                        cMsg     := "Falha apontamento (operacao " + ;
+                            AllTrim(cValToChar(::GetSafe(oApt, "cOperacao", ""))) + "): " + ::oConstApon:GetUltimoErro()
+                        lAbortar := .T.
+                        Exit
+                    EndIf
+                    nApoCriados++
+                Next nJ
+            Catch oErr
+                cMsg     := "Erro interno no apontamento" + IIf(oErr != Nil, ": " + cValToChar(oErr:Description), "")
+                lAbortar := .T.
+            EndTry
+            If lAbortar
+                DisarmTransaction()
+                nApoCriados := 0
+            EndIf
+        End Transaction
+
+        If lAbortar
+            // Apontamento falhou: apontamentos estornados pelo DisarmTransaction.
+            // Os empenhos estao COMMITADOS -> exclui empenhos + OP via ExecAuto.
+            cStatus := STATUS_ERRO
+            ::oConstEmp:ExcluirEmpenhosOP(OP_COMPLETA(cNumOp))
+            nEmpCriados := 0
+            If lOpCriada
+                If ::oConstOP:ExcluirOP(cNumOp)
+                    cMsg += " | empenhos e OP " + AllTrim(cNumOp) + " EXCLUIDOS (rollback)."
+                Else
+                    cMsg += " | empenhos excluidos; ATENCAO falha ao excluir OP " + AllTrim(cNumOp) + " - " + ::oConstOP:GetUltimoErro()
+                EndIf
+            Else
+                cMsg += " | empenhos excluidos (OP preexistente mantida)."
+            EndIf
+        ElseIf Len(aSemSaldo) > 0
+            // PARCIAL ok (PENDENCIA DE SALDO, nao e erro real): parciais apontadas
+            // + TODOS os empenhos incluidos (os sem saldo ficam reservados).
+            // Operacao TOTAL pendente - OP NAO encerra. Status P (Pendente): sai
+            // como ALERTA no relatorio e fica reprocessavel (PCPI003 le E/R/P).
+            // Finalizar apos a entrada de estoque; o PE MT681INC (PCPIA01.tlpp)
+            // poe a Z01 em verde quando a OP completar/encerrar.
+            cStatus := STATUS_PEND
+            cEtapa  := ETAPA_APONT
+            cMsg    := "OP parcial: parciais apontadas, " + cValToChar(nEmpCriados) + " empenho(s) incluido(s). Operacao TOTAL pendente (sem saldo): " + ;
+                cMsgSaldo + " Finalizar manualmente apos a entrada de estoque."
+        Else
+            cStatus := STATUS_OK
+            cMsg    := "OP processada (empenhos=" + cValToChar(nEmpCriados) + ", apontamentos=" + cValToChar(nApoCriados) + ")"
+        EndIf
+    EndIf
+
+    oRet["lOk"]     := (cStatus == STATUS_OK)
+    oRet["cStatus"] := cStatus
+    oRet["cEtapa"]  := cEtapa
+    oRet["cMsg"]    := cMsg
+    oRet["cOpProt"] := cNumOp
+    oRet["nEmp"]    := nEmpCriados
+    oRet["nApo"]    := nApoCriados
+    oRet["nSub"]    := 0
+    ::cUltimoErro   := cMsg
+
+Return oRet
+
+/*/{Protheus.doc} ProcessadorOP:Falha
+Preenche o JsonObject de resultado com STATUS_ERRO na etapa informada.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oRet, Object, JsonObject de resultado
+@param cEtapa, Character, Etapa da falha
+@param cMsg, Character, Mensagem
+@param cOpProt, Character, OP Protheus (pode ser vazio)
+@return Object, JsonObject preenchido
+/*/
+Method Falha(oRet, cEtapa, cMsg, cOpProt) Class ProcessadorOP
+
+    oRet["lOk"]     := .F.
+    oRet["cStatus"] := STATUS_ERRO
+    oRet["cEtapa"]  := cEtapa
+    oRet["cMsg"]    := cMsg
+    oRet["cOpProt"] := cOpProt
+    oRet["nEmp"]    := 0
+    oRet["nApo"]    := 0
+    oRet["nSub"]    := 0
+    ::cUltimoErro   := cMsg
+
+Return oRet
+
+/*/{Protheus.doc} ProcessadorOP:ValidarProdutos
+Pre-valida o produto da OP e os componentes do empenho: cada um deve
+existir em SB1 e nao estar bloqueado (B1_MSBLQL == "1"). No novo modelo
+nao ha subprodutos.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param cProdutoSB1, Character, Produto da OP
+@param aEmp, Array, Componentes do empenho
+@return Character, "" se ok ou lista de produtos invalidos
+/*/
+Method ValidarProdutos(cProdutoSB1, aEmp) Class ProcessadorOP
+Local cErros  := ""  as character
+Local nI      := 0   as numeric
+Local aArea   := {}  as array
+Local oVistos := JsonObject():New() as object
+
+    aArea := GetArea()
+    dbSelectArea("SB1")
+    SB1->(dbSetOrder(1))   // B1_FILIAL + B1_COD
+
+    cErros += ::ChecarSB1(cProdutoSB1, "Produto da OP", oVistos)
+
+    For nI := 1 To Len(aEmp)
+        cErros += ::ChecarSB1(::GetSafe(aEmp[nI], "cCodSucata", ""), "Componente", oVistos)
+    Next nI
+
+    RestArea(aArea)
+
+Return AllTrim(cErros)
+
+/*/{Protheus.doc} ProcessadorOP:ChecarSB1
+Valida 1 produto SB1: existe e nao bloqueado. Codigo vazio e ignorado.
+Requer a SB1 ja selecionada com ordem 1.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param cProd, Character, Codigo do produto
+@param cDesc, Character, Papel do produto (para a mensagem)
+@param oVistos, Object, Cache de codigos ja validados
+@return Character, "" se ok ou o motivo
+/*/
+Method ChecarSB1(cProd, cDesc, oVistos) Class ProcessadorOP
+Local cRet   := "" as character
+Local cChave := "" as character
+
+    cProd := AllTrim(cValToChar(cProd))
+    If Empty(cProd)
+        Return ""
+    EndIf
+
+    cChave := Upper(cProd)
+    If oVistos != Nil .And. oVistos:HasProperty(cChave)
+        Return ""
+    EndIf
+    If oVistos != Nil
+        oVistos[cChave] := .T.
+    EndIf
+
+    If !SB1->(dbSeek(xFilial("SB1") + cProd))
+        cRet := cDesc + " " + cProd + " (nao cadastrado); "
+    ElseIf AllTrim(SB1->B1_MSBLQL) == "1"
+        cRet := cDesc + " " + cProd + " (BLOQUEADO); "
+    EndIf
+
+Return cRet
+
+/*/{Protheus.doc} ProcessadorOP:ValidarSaldo
+Valida o saldo (SB2.B2_QATU) dos componentes a CONSUMIR (somente
+quantidade positiva; negativos sao retorno/co-produto e nao consomem).
+Agrega por produto+local (B1_LOCPAD) e compara com o saldo atual.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 09/06/2026
+@param aEmp, Array, Componentes do empenho (cCodSucata, nQtd)
+@return Character, "" se ha saldo para todos, ou a lista dos sem saldo
+/*/
+Method ValidarSaldo(aEmp, aSemSaldo) Class ProcessadorOP
+Local cErros := ""  as character
+Local nI     := 0   as numeric
+Local aArea  := {}  as array
+Local oSoma  := JsonObject():New() as object
+Local aNomes := {}  as array
+Local cCod   := ""  as character
+Local cLocal := ""  as character
+Local cChave := ""  as character
+Local nQtd   := 0   as numeric
+Local nSaldo := 0   as numeric
+Local nPos   := 0   as numeric
+
+    // aSemSaldo (por referencia): codigos dos produtos SEM saldo. Usado para
+    // TRAVAR o apontamento/encerramento ate a entrada de estoque (o empenho e
+    // criado para todos; quem nao tem saldo fica pendente de estoque).
+    If ValType(aSemSaldo) != "A"
+        aSemSaldo := {}
+    EndIf
+
+    aArea := GetArea()
+    dbSelectArea("SB1")
+    SB1->(dbSetOrder(1))   // B1_FILIAL+B1_COD
+    dbSelectArea("SB2")
+    SB2->(dbSetOrder(1))   // B2_FILIAL+B2_COD+B2_LOCAL
+
+    // Soma a quantidade POSITIVA a consumir por produto+local
+    For nI := 1 To Len(aEmp)
+        cCod := AllTrim(cValToChar(::GetSafe(aEmp[nI], "cCodSucata", "")))
+        nQtd := ::GetSafe(aEmp[nI], "nQtd", 0)
+        If Empty(cCod) .Or. nQtd <= 0   // negativos nao precisam de saldo
+            Loop
+        EndIf
+        cLocal := ""
+        If SB1->(dbSeek(xFilial("SB1") + cCod))
+            cLocal := SB1->B1_LOCPAD
+        EndIf
+        cChave := cCod + "|" + cLocal
+        If oSoma:HasProperty(cChave)
+            oSoma[cChave] := oSoma[cChave] + nQtd
+        Else
+            oSoma[cChave] := nQtd
+        EndIf
+    Next nI
+
+    SB2->(dbSetOrder(1))   // B2_FILIAL+B2_COD+B2_LOCAL
+
+    // Valida saldo (B2_QATU) por produto+local
+    aNomes := oSoma:GetNames()
+    For nI := 1 To Len(aNomes)
+        cChave := aNomes[nI]
+        nQtd   := oSoma[cChave]
+        nPos   := At("|", cChave)
+        cCod   := SubStr(cChave, 1, nPos - 1)
+        cLocal := SubStr(cChave, nPos + 1)
+        nSaldo := 0
+        If SB2->(dbSeek(xFilial("SB2") + padr(cCod, TAMSX3("B2_COD")[1]) + padr(cLocal, TAMSX3("B2_LOCAL")[1])))
+            nSaldo := SB2->B2_QATU
+        EndIf
+        If nSaldo < nQtd
+            cErros += cCod + "/" + cLocal + " (saldo " + cValToChar(nSaldo) + " < necessario " + cValToChar(nQtd) + "); "
+            aAdd(aSemSaldo, cCod)   // sem saldo -> trava o apontamento ate ter estoque
+        EndIf
+    Next nI
+
+    RestArea(aArea)
+
+Return AllTrim(cErros)
+
+/*/{Protheus.doc} ProcessadorOP:GetSafe
+Acesso seguro a uma propriedade de um JsonObject.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param oObj, Object, JsonObject
+@param cChave, Character, Propriedade
+@param xDefault, Variant, Default
+@return Variant, Valor ou default
+/*/
+Method GetSafe(oObj, cChave, xDefault) Class ProcessadorOP
+Local xValor := xDefault
+
+    If (ValType(oObj) == "J" .Or. ValType(oObj) == "O") .And. oObj:HasProperty(cChave)
+        xValor := oObj[cChave]
+    EndIf
+
+Return xValor
+
+/*/{Protheus.doc} ProcessadorOP:GetUltimoErro
+Retorna a ultima mensagem registrada.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Character, Mensagem
+/*/
+Method GetUltimoErro() Class ProcessadorOP
+Return ::cUltimoErro

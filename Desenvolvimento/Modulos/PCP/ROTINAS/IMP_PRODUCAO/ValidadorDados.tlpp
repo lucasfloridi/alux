@@ -1,0 +1,234 @@
+#include "totvs.ch"
+#include "tlpp-core.th"
+#include "PCPI001.th"
+
+namespace Alux.PCP.ValidadorDados
+
+/*/{Protheus.doc} ValidadorDados
+Valida linhas das planilhas de movimento antes do processamento.
+Classifica cada linha em STATUS_OK (valida, processa), STATUS_ERRO
+(dado invalido) ou STATUS_IGN (regra de negocio descarta).
+Classe stateless - sem propriedades.
+
+@type  Class
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@version 12.1.2410
+/*/
+Class ValidadorDados
+
+    Public Method New() Constructor
+    Public Method ValidarProducao(oLinha)
+    Public Method ValidarOperacao(oLinha)
+    Public Method ValidarMatPrima(oLinha)
+    Public Method ValidarHorario(dInicio, cHoraInicio, dFim, cHoraFim)
+
+    Private Method NovoRet(lValido, cClass, cMotivo)
+    Private Method IsEmpty(xVal)
+
+EndClass
+
+/*/{Protheus.doc} ValidadorDados:New
+Construtor. Classe stateless, apenas retorna Self.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@return Self
+/*/
+Method New() Class ValidadorDados
+Return Self
+
+/*/{Protheus.doc} ValidadorDados:ValidarProducao
+Valida 1 linha do t_producao (cabecalho da OP). Produto (codigo) e
+quantidade sao obrigatorios. Datas previsao/entrega sao opcionais.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oLinha, Object, Linha a validar (JsonObject)
+@return Object, JsonObject com lValido, cClassificacao, cMotivo
+/*/
+Method ValidarProducao(oLinha) Class ValidadorDados
+Local cOrdProd := "" as character
+Local cProduto := "" as character
+Local nQtdProd := 0  as numeric
+Local dInicio  := CtoD("") as date
+Local dFim     := CtoD("") as date
+
+    cOrdProd := oLinha["cOrdProd"]
+    cProduto := oLinha["cProduto"]
+    nQtdProd := oLinha["nQtdProd"]
+    dInicio  := oLinha["dInicio"]
+    dFim     := oLinha["dFim"]
+
+    If ::IsEmpty(cOrdProd)
+        Return ::NovoRet(.F., STATUS_ERRO, "Numero OP obrigatorio (t_producao)")
+    EndIf
+
+    If ::IsEmpty(cProduto)
+        Return ::NovoRet(.F., STATUS_ERRO, "Produto (codigo) obrigatorio (t_producao)")
+    EndIf
+
+    // Regra: NAO importar OP cujo codigo de produto contenha "B". Loga no
+    // relatorio como ERRO (para o Excel abrir mesmo quando for o unico problema)
+    // - nao cria registro na Z01 nem OP no Protheus.
+    If "B" $ Upper(AllTrim(cValToChar(cProduto)))
+        Return ::NovoRet(.F., STATUS_ERRO, "Produto " + AllTrim(cValToChar(cProduto)) + " contem 'B' - OP nao importada (regra)")
+    EndIf
+
+    If nQtdProd <= 0
+        Return ::NovoRet(.F., STATUS_ERRO, "Quantidade da OP invalida (t_producao)")
+    EndIf
+
+    // Datas opcionais; se ambas vierem, valida a ordem
+    If !::IsEmpty(dInicio) .And. !::IsEmpty(dFim)
+        If dFim < dInicio
+            Return ::NovoRet(.F., STATUS_ERRO, "Data de entrega anterior a previsao (t_producao)")
+        EndIf
+    EndIf
+
+Return ::NovoRet(.T., STATUS_OK, "")
+
+/*/{Protheus.doc} ValidadorDados:ValidarOperacao
+Valida 1 linha do t_operacao (apontamento por operacao). Ordem de
+producao e operacao sao obrigatorios. Quantidade pode ser zero (so a
+operacao que produz carrega quantidade).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oLinha, Object, Linha a validar (JsonObject)
+@return Object, JsonObject com lValido, cClassificacao, cMotivo
+/*/
+Method ValidarOperacao(oLinha) Class ValidadorDados
+Local cOrdProd  := "" as character
+Local cOperacao := "" as character
+
+    cOrdProd  := oLinha["cOrdProd"]
+    cOperacao := oLinha["cOperacao"]
+
+    If ::IsEmpty(cOrdProd)
+        Return ::NovoRet(.F., STATUS_ERRO, "Numero OP obrigatorio (t_operacao)")
+    EndIf
+
+    If ::IsEmpty(cOperacao) .Or. Val(AllTrim(cValToChar(cOperacao))) <= 0
+        Return ::NovoRet(.F., STATUS_ERRO, "Operacao obrigatoria/invalida (t_operacao)")
+    EndIf
+
+Return ::NovoRet(.T., STATUS_OK, "")
+
+/*/{Protheus.doc} ValidadorDados:ValidarMatPrima
+Valida 1 linha do t_materia_primas (consumo/empenho). Ordem de
+producao, componente (codigo) e quantidade sao obrigatorios.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 02/06/2026
+@param oLinha, Object, Linha a validar (JsonObject)
+@return Object, JsonObject com lValido, cClassificacao, cMotivo
+/*/
+Method ValidarMatPrima(oLinha) Class ValidadorDados
+Local cOrdProd   := "" as character
+Local cCodSucata := "" as character
+Local nQtd       := 0  as numeric
+
+    cOrdProd   := oLinha["cOrdProd"]
+    cCodSucata := oLinha["cCodSucata"]
+    nQtd       := oLinha["nQtd"]
+
+    If ::IsEmpty(cOrdProd)
+        Return ::NovoRet(.F., STATUS_ERRO, "Numero OP obrigatorio (t_materia_primas)")
+    EndIf
+
+    If ::IsEmpty(cCodSucata)
+        Return ::NovoRet(.F., STATUS_ERRO, "Codigo do componente obrigatorio (t_materia_primas)")
+    EndIf
+
+    // Quantidade negativa e VALIDA (co-produto/retorno ao estoque). So zero
+    // e descartado (sem movimento).
+    If nQtd == 0
+        Return ::NovoRet(.F., STATUS_ERRO, "Quantidade do componente nao pode ser zero (t_materia_primas)")
+    EndIf
+
+Return ::NovoRet(.T., STATUS_OK, "")
+
+/*/{Protheus.doc} ValidadorDados:ValidarHorario
+Garante que hora_fim > hora_inicio (considerando virada de dia).
+Se dFim > dInicio, retorna .T. automaticamente.
+Se mesmo dia, compara HH:MM lexicalmente.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param dInicio, Date, Data inicio
+@param cHoraInicio, Character, Hora inicio "HH:MM"
+@param dFim, Date, Data fim
+@param cHoraFim, Character, Hora fim "HH:MM"
+@return Logical, .T. se fim > inicio
+/*/
+Method ValidarHorario(dInicio, cHoraInicio, dFim, cHoraFim) Class ValidadorDados
+Local nMinIni := 0 as numeric
+Local nMinFim := 0 as numeric
+
+    If dFim > dInicio
+        Return .T.
+    EndIf
+
+    If dFim == dInicio
+        nMinIni := Val(SubStr(cHoraInicio, 1, 2)) * 60 + Val(SubStr(cHoraInicio, 4, 2))
+        nMinFim := Val(SubStr(cHoraFim, 1, 2))    * 60 + Val(SubStr(cHoraFim, 4, 2))
+        If nMinFim > nMinIni
+            Return .T.
+        EndIf
+    EndIf
+
+Return .F.
+
+/*/{Protheus.doc} ValidadorDados:NovoRet
+Helper privado. Monta JsonObject de retorno padronizado.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param lValido, Logical, .T. se a linha e valida
+@param cClass, Character, STATUS_OK / STATUS_ERRO / STATUS_IGN
+@param cMotivo, Character, Mensagem descritiva
+@return Object, JsonObject com lValido, cClassificacao, cMotivo
+/*/
+Method NovoRet(lValido, cClass, cMotivo) Class ValidadorDados
+Local oRet := JsonObject():New() as object
+
+    oRet["lValido"]        := lValido
+    oRet["cClassificacao"] := cClass
+    oRet["cMotivo"]        := cMotivo
+
+Return oRet
+
+/*/{Protheus.doc} ValidadorDados:IsEmpty
+Helper privado. Verifica se um valor esta vazio considerando
+String (trim/Empty), Numerico (zero), Data (Empty) e Nil.
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 29/05/2026
+@param xVal, Variant, Valor a ser testado
+@return Logical, .T. se vazio
+/*/
+Method IsEmpty(xVal) Class ValidadorDados
+Local cTipo := "" as character
+
+    cTipo := ValType(xVal)
+
+    Do Case
+        Case cTipo == "U"
+            Return .T.
+        Case cTipo == "C"
+            Return Empty(AllTrim(xVal))
+        Case cTipo == "N"
+            Return xVal == 0
+        Case cTipo == "D"
+            Return Empty(xVal)
+    EndCase
+
+Return .F.

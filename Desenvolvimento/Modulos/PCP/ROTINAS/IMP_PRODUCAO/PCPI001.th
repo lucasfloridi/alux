@@ -1,0 +1,128 @@
+// ------------------------------------------------------------
+// PCPI001.th
+// Header compartilhado entre PCPI001 e PCPI002
+// Defines de paths, arquivos auxiliares, TM, etapas, status
+// Autor: Leonardo Barboza Ribeiro Leite
+// Data : 29/05/2026
+// ------------------------------------------------------------
+
+#ifndef _PCPI001_TH_
+#define _PCPI001_TH_
+
+// Caminhos no rootpath
+#define PATH_AUX        "\dados\automacao_apontamento\"
+#define PATH_HIST       "\dados\automacao_apontamento\historico\"
+#define PATH_MOV        "\dados\automacao_apontamento\movimento\"
+#define PATH_MOVHIST    "\dados\automacao_apontamento\movimento\historico\"
+#define PATH_UPLOAD     "\dados\automacao_apontamento\upload\"
+
+// Arquivos de movimento (CSV) - NOVO MODELO. Enviados/gerenciados pela tela de
+// selecao da PCPI001 (SelecaoArquivos). Ficam na PATH_MOV e sao lidos de la.
+//   t_producao      -> cabecalho da OP  (MATA650): codigo, qtd, roteiro
+//   t_operacao      -> apontamento Mod2 (MATA681): operacao, recurso, qtd, datas
+//   t_materia_primas-> consumo/empenho  (MATA381): codigo, qtd
+#define ARQ_PRODUCAO    "t_producao.csv"
+#define ARQ_OPERACAO    "t_operacao.csv"
+#define ARQ_MATPRIMA    "t_materia_primas.csv"
+
+// Arquivos auxiliares fixos (formato CSV - FwXlsxUtil nao existe na 12.1.2410)
+// PCP exporta cada planilha como CSV e importa via PCPI002
+#define ARQ_RM          "RM.csv"             // rendimento metalico (cod_sucata;Rm)
+#define ARQ_REV_PRODAC  "REV_PRODACAB.csv"   // produto acabado: codigo;descricao;produto(liga)
+#define ARQ_REV_SOBREF  "REV_SOBREF.csv"     // sobras e refugos: codigo;descricao;produto(liga)
+
+// Delimitador padrao do CSV (Excel BR usa ";"). O leitor tenta auto-detectar
+// entre ";" e "," pela linha de cabecalho; este e o fallback.
+#define CSV_DELIM       ";"
+
+// Tipos de Movimento (TM) de consumo / subproduto / refugo
+// Sem SG1, o consumo de MP e informado via AUTCONSUMO (backflush desligado).
+// 999 = Requisicao automatica (TM reservado do sistema - nao precisa estar na
+// SF5). 499 = Devolucao automatica (reservado) - usar so em estorno, NAO no
+// consumo.
+#define TM_CONSUMO      "999"   // AUTCONSUMO - requisicao automatica (RE1)
+#define TM_COPRODU      "499"   // AUTCOPRODU - devolucao automatica (DE1, co-produto)
+#define TM_REFUGO       "499"   // refugo - devolucao automatica
+
+// Motivo de refugo (BC_MOTIVO) - tabela SX5. PENDENTE confirmacao PCP
+#define MOTIVO_REFUGO   ""
+
+// Backflush do apontamento (AUTASKULT = .T.).
+// O backflush consome os EMPENHOS (SD4) da OP automaticamente, baixando-os
+// (A250Atu) ANTES do encerramento (A250End) - logo nao da A250NOENC. O TM da
+// requisicao automatica e INTERNO do A250Atu, entao NAO se informa TM.
+// Pre-requisito: o empenho tem de ter o D4_PRODUTO = produto PAI da OP, senao
+// o backflush nao reconhece o empenho como da producao e ele fica pendente
+// (-> A250NOENC). Ver ConstrutorEmpenho (grava D4_PRODUTO). A operacao
+// (D4_OPERAC) fica VAZIA, igual a OP de producao que funciona manualmente:
+// o consumo casa por OP + Produto Pai, nao por operacao.
+#define USA_BACKFLUSH   .T.
+
+// Etapas do processo (gravadas na Z01)
+#define ETAPA_LEIT      "L"
+#define ETAPA_VALID     "V"
+#define ETAPA_OP        "O"
+#define ETAPA_EMPENHO   "E"
+#define ETAPA_APONT     "A"
+#define ETAPA_RELAT     "R"
+#define ETAPA_UPAUX     "U"
+
+// Status do processamento
+#define STATUS_OK       "S"
+#define STATUS_WARN     "W"
+#define STATUS_ERRO     "E"
+#define STATUS_IGN      "I"
+#define STATUS_REPROC   "R"
+#define STATUS_PEND     "P"
+
+// Codigos SB1 dos produtos SAL (Sucata de Aluminio)
+#define COD_SAL_1       "FUN010001"
+#define COD_SAL_2       "FUN010004"
+#define COD_SAL_3       "FUN010005"
+#define COD_SAL_4       "FUN010006"
+
+// Codigos SB1 fixos de subprodutos (PENDENTE confirmacao PCP)
+// 3 METAL evidenciado em RM/REVISAO2 como SUB020001 - confirmar com PCP
+#define SB1_3METAL      "SUB020001"
+// BORRA ALUX / BORRA PRETA - codigo a confirmar com PCP (preencher antes do go-live)
+#define SB1_BORRA       ""
+
+// Roteiro default para busca de recurso na SG2 (indice 1 = FILIAL+PRODUTO+ROTEIRO+OPERAC)
+// Se a OP nao tiver roteiro especifico, usa este. Confirmar com PCP.
+#define ROTEIRO_DEFAULT     "01"
+
+// Numero da OP (C2_NUM): a OP SEMPRE termina com o ano (2 digitos), derivado
+// da data de emissao da OP (dt_emissao). 2026 -> "26", 2027 -> "27".
+//   182 -> "0182" + "26" = "018226" ; 1182 -> "1182" + "26" = "118226"
+// Ver ConstrutorOP:FormatarNumOp.
+
+// Monta a OP completa (D4_OP / H6_OP) = C2_NUM + C2_ITEM + C2_SEQUEN, com
+// item/sequencia zero-padded no TAMANHO REAL dos campos (TamSX3), para o
+// seek/SQL casar sempre com o que esta gravado.
+#define OP_COMPLETA(_cNum) ( (_cNum) + StrZero(1, TamSX3("C2_ITEM")[1]) + StrZero(1, TamSX3("C2_SEQUEN")[1]) )
+
+// Tamanhos de campos das tabelas padrao Protheus
+#define TAM_C2_NUM          6
+#define TAM_C2_ITEM         2
+#define TAM_C2_SEQUEN       3
+#define ITEM_DEFAULT        "01"
+#define SEQUEN_DEFAULT      "001"
+#define TIPO_OP_FIRME       "F"
+#define TAM_D4_TRT          4
+
+// Tamanhos de campos da Z01
+// Lote: AAMMDD + HHMMSS + ThreadId (5) = 17, arredondado para 18 (lote unico por thread)
+#define TAM_Z01_LOTE        18
+#define TAM_Z01_MSG         254
+#define TAM_Z01_PAID        40
+#define TAM_Z01_HASH        32
+#define TAM_Z01_USER        15
+#define TAM_Z01_OP          6
+#define TAM_Z01_ORDSEP      10
+#define TAM_Z01_ARQUIV      100
+#define TAM_Z01_CODLIG      15
+
+// Janela default do cache de idempotencia (dias)
+#define CACHE_IDEM_DIAS     7
+
+#endif
