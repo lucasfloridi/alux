@@ -1,1 +1,9 @@
+<<<<<<< Updated upstream
 .vscode/
+=======
+.vscode/.linter/.blacklist
+.vscode/launch.json
+.vscode/settings.json
+.vscode/.advpl/_binary_class.prw
+.vscode/.advpl/_binary_functions.prw
+>>>>>>> Stashed changes
