@@ -1,0 +1,61 @@
+#Include "TBICONN.ch"
+
+user function upXmlCko() as logical
+    local lReturn       :=  .T. as logical
+    local cDirectory    :=  ""  as character
+    local cDirServer    :=  ""  as character
+    local aFiles        :=  {}  as array
+    local aSizes        :=  {}  as array
+    local nA            :=  1   as numeric
+    local lCopyFiles    :=  .F. as logical
+    
+    cDirServer  :=  getNewPar("MV_XDIRXML", "\importadorxml\inn")
+    
+    if !parameterdirectory()
+        return .F.
+    endIf
+    
+    cDirectory  :=  alltrim(MV_PAR01)
+
+    if empty(cDirectory)
+        Aviso("Atenção!","Favor informar o arquivo a ser copiado!")   
+        return .F.
+    endIf
+
+    if !existDir(cDirServer)
+        if makeDir(cDirServer) <> 0
+            Aviso("Atenção!","Não foi possível criar diretório no servidor!") 
+            return .F.   
+        endIf
+    endIf
+
+    ADir(cDirectory+"\*.*", aFiles, aSizes)
+
+    for nA:=1 to len(aFiles)
+        if CpyT2S(cDirectory+"\"+aFiles[nA], cDirServer)
+            lCopyFiles  :=  .T.    
+        else
+            Aviso("Atenção!","Não foi possível copiar o arquivo .xml para o diretório servidor!")
+            return .F.
+        endIf
+    next nA
+
+    if lCopyFiles
+        msgInfo("Arquivo(s) copiado(s) com sucesso!", "Atenção!")
+    endIf
+return lReturn
+
+static function parameterdirectory()
+    local aParamBox :=  {}  as array
+    local lReturn   :=  .F. as logical
+
+    cDirectory := getNewPar("MV_XBUSXML", "D:\")
+    aAdd(aParamBox, {1, "Diretório importação XML",  padr(cDirectory,50), "", ".T.", "",    ".T.", 120, .T.})
+
+    if paramBox(aParamBox, "Informe os parâmetros", , , , , , , , , .F., .F.)
+        lReturn := .T.
+        putmv("MV_XBUSXML", alltrim(MV_PAR01 ))
+    endIf
+return lReturn
+
+

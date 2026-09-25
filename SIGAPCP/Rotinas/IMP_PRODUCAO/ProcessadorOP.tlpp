@@ -41,6 +41,7 @@ Class ProcessadorOP
     Private Method ValidarProdutos(cProdutoSB1, aEmp)
     Private Method ChecarSB1(cProd, cDesc, oVistos)
     Private Method ValidarSaldo(aEmp, aSemSaldo)
+    Private Method OrdenarApontamentos(aApo)
     Private Method GetSafe(oObj, cChave, xDefault)
 
 EndClass
@@ -110,6 +111,14 @@ Method Processar(oDadosOP) Class ProcessadorOP
     oCab := oDadosOP["oCab"]
     aEmp := oDadosOP["aEmp"]
     aApo := oDadosOP["aApo"]
+
+    // Ordena as operacoes ANTES de apontar: as que NAO consomem saldo (parciais,
+    // qtd 0) primeiro e a que produz/encerra a OP (backflush, qtd > 0) por ultimo;
+    // dentro de cada grupo, por numero de operacao ascendente. Sem isso, se o
+    // arquivo trouxer a operacao TOTAL antes das parciais, a total encerra a OP e
+    // as parciais seguintes falham com A680OPTOT (capacidade da operacao ja
+    // totalizada), derrubando o apontamento e o rollback de empenhos + OP.
+    aApo := ::OrdenarApontamentos(aApo)
 
     // Data de movimento da OP (dt_emissao; fallback previsao_inicio): usada
     // como data base na criacao da OP e dos empenhos.
@@ -537,3 +546,50 @@ Retorna a ultima mensagem registrada.
 /*/
 Method GetUltimoErro() Class ProcessadorOP
 Return ::cUltimoErro
+
+/*/{Protheus.doc} ProcessadorOP:OrdenarApontamentos
+Ordena as operacoes (linhas do t_operacao) da OP para o apontamento: as que
+NAO consomem saldo (parciais/intermediarias, qtd 0) vem primeiro e a que
+produz/encerra a OP (backflush, qtd > 0) por ultimo; dentro de cada grupo, por
+numero de operacao ascendente. Garante que a operacao que totaliza/encerra a OP
+seja a ULTIMA apontada, evitando o A680OPTOT quando o arquivo traz a operacao
+total antes das parciais. Nao altera o array original (trabalha numa copia).
+
+@type  Method
+@author Leonardo Barboza Ribeiro Leite
+@since 22/07/2026
+@param aApo, Array, Operacoes da OP (JsonObject por linha, com cOperacao e nQtd)
+@return Array, Novo array ordenado para o apontamento
+/*/
+Method OrdenarApontamentos(aApo) Class ProcessadorOP
+Local aPares := {}  as array
+Local aOrd   := {}  as array
+Local oLin   := Nil as object
+Local nI     := 0   as numeric
+Local nQtd   := 0   as numeric
+Local nOper  := 0   as numeric
+Local nGrupo := 0   as numeric
+
+    If ValType(aApo) != "A" .Or. Len(aApo) <= 1
+        Return aApo
+    EndIf
+
+    // Monta pares {chave, linha}. Chave = grupo * 1000000 + operacao. Grupo 0 =
+    // nao consome saldo (parcial); grupo 1 = consome (produz/encerra). O peso do
+    // grupo poe TODAS as parciais antes de qualquer consumidora; a operacao
+    // (ascendente) ordena dentro de cada grupo (10, 20, 30...).
+    For nI := 1 To Len(aApo)
+        oLin   := aApo[nI]
+        nQtd   := ::GetSafe(oLin, "nQtd", 0)
+        nOper  := Val(AllTrim(cValToChar(::GetSafe(oLin, "cOperacao", "0"))))
+        nGrupo := IIf(nQtd > 0, 1, 0)
+        aAdd(aPares, {nGrupo * 1000000 + nOper, oLin})
+    Next nI
+
+    aSort(aPares,,, {|x, y| x[1] < y[1]})
+
+    For nI := 1 To Len(aPares)
+        aAdd(aOrd, aPares[nI][2])
+    Next nI
+
+Return aOrd

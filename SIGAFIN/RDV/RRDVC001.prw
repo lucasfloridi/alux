@@ -52,12 +52,12 @@ User Function RRDVC001()
 
 	//Filtrando os dados
 	If !(RetCodUsr() $ '000000|000328')
-    	oBrowse:SetFilterDefault("Alltrim(SZM->ZM_USUARIO) = '" + RetCodUsr() + "' .OR. SZM->ZM_APROV = '" + RetCodUsr() + "' ")
+    	oBrowse:SetFilterDefault("Alltrim(SZM->ZM_USUARIO) = '" + RetCodUsr() + "' .OR. SZM->ZM_APROV = '" + RetCodUsr() + "' .OR. Alltrim(SZM->ZM_USRINC) = '" + RetCodUsr() + "' ")
 	Endif
 
 	//Adicionando as Legendas
 	oBrowse:AddLegend( "ZM_STATUS = '1'", "BLUE",    	"Pendente" )
-	oBrowse:AddLegend( "ZM_STATUS = '2'", "ORANGE",   	"Enviado para Aprova��o" )
+	oBrowse:AddLegend( "ZM_STATUS = '2'", "ORANGE",   	"Enviado para Aprovacao" )
 	oBrowse:AddLegend( "ZM_STATUS = '3'", "GREEN",    	"Aprovado" )
 	oBrowse:AddLegend( "ZM_STATUS = '4'", "RED",    	"Pago" )
 	
@@ -86,7 +86,7 @@ Static Function MenuDef()
 	ADD OPTION aRotina TITLE "Alterar" ACTION "VIEWDEF.RRDVC001" OPERATION 4 ACCESS 0
 	ADD OPTION aRotina TITLE "Excluir" ACTION "VIEWDEF.RRDVC001" OPERATION 5 ACCESS 0
 	ADD OPTION aRotina TITLE "Copiar" ACTION "VIEWDEF.RRDVC001" OPERATION 9 ACCESS 0
-	ADD OPTION aRotina TITLE "Enviar para Aprova��o" ACTION "U_RRDV001D" OPERATION 6 ACCESS 0
+	ADD OPTION aRotina TITLE "Enviar para Aprovacao" ACTION "U_RRDV001D" OPERATION 6 ACCESS 0
 	ADD OPTION aRotina TITLE "Aprovar" ACTION "U_RRDV001F" OPERATION 6 ACCESS 0
 	ADD OPTION aRotina TITLE "Reprovar" ACTION "U_RRDV001G" OPERATION 6 ACCESS 0	
 
@@ -121,80 +121,80 @@ Static Function ModelDef()
         "ZM_FORNECE",;                                	//Campo Origem
         "ZM_USUARIO",;                                 	//Campo Destino
         "SA2->A2_XUSRRDV",;           					//Regra de Preenchimento
-        .T.,;                                       	//Ir� Posicionar?
+        .T.,;                                       	//Ira Posicionar?
         "SA2",;                                        	//Alias de Posicionamento
-        1,;                                         	//�ndice de Posicionamento
+        1,;                                         	//Indice de Posicionamento
         'XFILIAL("SA2")+M->ZM_FORNECE + M->ZM_LOJA',;   //Chave de Posicionamento
-        NIL,;                                      	 	//Condi��o para execu��o do gatilho
-        "001");                                      	//Sequ�ncia do gatilho
+        NIL,;                                      	 	//Condicao para execucao do gatilho
+        "001");                                      	//Sequencia do gatilho
     )
 
 	aAdd(aGatilhos, FWStruTriggger( ;
         "ZM_LOJA",; 	                              	//Campo Origem
         "ZM_USUARIO",;                                 	//Campo Destino
         "SA2->A2_XUSRRDV",;           					//Regra de Preenchimento
-        .T.,;                                       	//Ir� Posicionar?
+        .T.,;                                       	//Ira Posicionar?
         "SA2",;                                        	//Alias de Posicionamento
-        1,;                                         	//�ndice de Posicionamento
+        1,;                                         	//Indice de Posicionamento
         'XFILIAL("SA2")+M->ZM_FORNECE + M->ZM_LOJA',;   //Chave de Posicionamento
-        NIL,;                                      	 	//Condi��o para execu��o do gatilho
-        "001");                                      	//Sequ�ncia do gatilho
+        NIL,;                                      	 	//Condicao para execucao do gatilho
+        "001");                                      	//Sequencia do gatilho
     )
 
     aAdd(aGatilhos, FWStruTriggger( ;
         "ZM_FORNECE",;                                	//Campo Origem
         "ZM_APROV",;                                 	//Campo Destino
         "SA2->A2_XUSRAPR",;           					//Regra de Preenchimento
-        .T.,;                                       	//Ir� Posicionar?
+        .T.,;                                       	//Ira Posicionar?
         "SA2",;                                        	//Alias de Posicionamento
-        1,;                                         	//�ndice de Posicionamento
+        1,;                                         	//Indice de Posicionamento
         'XFILIAL("SA2")+M->ZM_FORNECE + M->ZM_LOJA',;   //Chave de Posicionamento
-        NIL,;                                      	 	//Condi��o para execu��o do gatilho
-        "002");                                      	//Sequ�ncia do gatilho
+        NIL,;                                      	 	//Condicao para execucao do gatilho
+        "002");                                      	//Sequencia do gatilho
     )
 
 	aAdd(aGatilhos, FWStruTriggger( ;
         "ZM_LOJA",; 	                              	//Campo Origem
         "ZM_APROV",;                                 	//Campo Destino
         "SA2->A2_XUSRAPR",;           					//Regra de Preenchimento
-        .T.,;                                       	//Ir� Posicionar?
+        .T.,;                                       	//Ira Posicionar?
         "SA2",;                                        	//Alias de Posicionamento
-        1,;                                         	//�ndice de Posicionamento
+        1,;                                         	//Indice de Posicionamento
         'XFILIAL("SA2")+M->ZM_FORNECE + M->ZM_LOJA',;   //Chave de Posicionamento
-        NIL,;                                      	 	//Condi��o para execu��o do gatilho
-        "002");                                      	//Sequ�ncia do gatilho
+        NIL,;                                      	 	//Condicao para execucao do gatilho
+        "002");                                      	//Sequencia do gatilho
     )
 
 	aAdd(aGatilhos, FWStruTriggger( ;
         "ZM_FORNECE",;                                	//Campo Origem
         "ZM_NOME",;                                 	//Campo Destino
         "SA2->A2_NREDUZ",;           					//Regra de Preenchimento
-        .T.,;                                       	//Ir� Posicionar?
+        .T.,;                                       	//Ira Posicionar?
         "SA2",;                                        	//Alias de Posicionamento
-        1,;                                         	//�ndice de Posicionamento
+        1,;                                         	//Indice de Posicionamento
         'XFILIAL("SA2")+M->ZM_FORNECE + M->ZM_LOJA',;   //Chave de Posicionamento
-        NIL,;                                      	 	//Condi��o para execu��o do gatilho
-        "003");                                      	//Sequ�ncia do gatilho
+        NIL,;                                      	 	//Condicao para execucao do gatilho
+        "003");                                      	//Sequencia do gatilho
     )
 
 	aAdd(aGatilhos, FWStruTriggger( ;
         "ZM_LOJA",; 	                              	//Campo Origem
         "ZM_NOME",;                                 	//Campo Destino
         "SA2->A2_NREDUZ",;           					//Regra de Preenchimento
-        .T.,;                                       	//Ir� Posicionar?
+        .T.,;                                       	//Ira Posicionar?
         "SA2",;                                        	//Alias de Posicionamento
-        1,;                                         	//�ndice de Posicionamento
+        1,;                                         	//Indice de Posicionamento
         'XFILIAL("SA2")+M->ZM_FORNECE + M->ZM_LOJA',;   //Chave de Posicionamento
-        NIL,;                                      	 	//Condi��o para execu��o do gatilho
-        "003");                                      	//Sequ�ncia do gatilho
+        NIL,;                                      	 	//Condicao para execucao do gatilho
+        "003");                                      	//Sequencia do gatilho
     )
 
 	For nAtual := 1 To Len(aGatilhos)
         oStruPai:AddTrigger( ;
             aGatilhos[nAtual][01],; //Campo Origem
             aGatilhos[nAtual][02],; //Campo Destino
-            aGatilhos[nAtual][03],; //Bloco de c�digo na valida��o da execu��o do gatilho
-            aGatilhos[nAtual][04];  //Bloco de c�digo de execu��o do gatilho
+            aGatilhos[nAtual][03],; //Bloco de codigo na validacao da execucao do gatilho
+            aGatilhos[nAtual][04];  //Bloco de codigo de execucao do gatilho
         )
     Next	
 
@@ -204,29 +204,30 @@ Static Function ModelDef()
         "ZN_NATUREZ",;                                //Campo Origem
         "ZN_DESCRI",;                                 //Campo Destino
         "SED->ED_DESCRIC",;           //Regra de Preenchimento
-        .T.,;                                       //Ir� Posicionar?
+        .T.,;                                       //Ira Posicionar?
         "SED",;                                        //Alias de Posicionamento
-        1,;                                         //�ndice de Posicionamento
+        1,;                                         //Indice de Posicionamento
         'XFILIAL("SED")+M->ZN_NATUREZ',;                                        //Chave de Posicionamento
-        NIL,;                                       //Condi��o para execu��o do gatilho
-        "001");                                      //Sequ�ncia do gatilho
+        NIL,;                                       //Condicao para execucao do gatilho
+        "001");                                      //Sequencia do gatilho
     )
 
 	For nAtual := 1 To Len(aGatilhos)
         oStruFilho:AddTrigger( ;
             aGatilhos[nAtual][01],; //Campo Origem
             aGatilhos[nAtual][02],; //Campo Destino
-            aGatilhos[nAtual][03],; //Bloco de c�digo na valida��o da execu��o do gatilho
-            aGatilhos[nAtual][04];  //Bloco de c�digo de execu��o do gatilho
+            aGatilhos[nAtual][03],; //Bloco de codigo na validacao da execucao do gatilho
+            aGatilhos[nAtual][04];  //Bloco de codigo de execucao do gatilho
         )
     Next			
 	
-	//Inicializadores Padr�es
+	//Inicializadores Padroes
 	oStruPai:SetProperty("ZM_FORNECE", MODEL_FIELD_INIT, {|| cFornece })
 	oStruPai:SetProperty("ZM_APROV", MODEL_FIELD_INIT, {|| cAprov })
 	oStruPai:SetProperty("ZM_LOJA", MODEL_FIELD_INIT, {|| cLojaFor })
 	oStruPai:SetProperty("ZM_NOME", MODEL_FIELD_INIT, {|| cNomeFor })
 	OStruPai:SetProperty("ZM_STATUS", MODEL_FIELD_INIT, {|| "1"})
+	oStruPai:SetProperty("ZM_USRINC", MODEL_FIELD_INIT, {|| RetCodUsr() })   // usuario de inclusao (criador)
 	oStruFilho:SetProperty("ZN_NATUREZ", MODEL_FIELD_INIT, {|| "51523"})
 	oStruFilho:SetProperty("ZN_DESCRI", MODEL_FIELD_INIT, {|| Posicione("SED",1,XFILIAL("SED")+"51523","ED_DESCRIC") })
 	oStruFilho:SetProperty("ZN_HRDIGIT", MODEL_FIELD_INIT, {|| Time() })   // hora automatica da digitacao da linha
@@ -268,6 +269,7 @@ Static Function ViewDef()
 	oStruPai:SetProperty("ZM_HRAPROV"	, MVC_VIEW_CANCHANGE, .F.)
 	oStruPai:SetProperty("ZM_APROV"		, MVC_VIEW_CANCHANGE, .F.)
 	oStruPai:SetProperty("ZM_LOGAPRO"	, MVC_VIEW_CANCHANGE, .F.)
+	oStruPai:SetProperty("ZM_USRINC"	, MVC_VIEW_CANCHANGE, .F.)
 
 	oStruFilho:SetProperty("ZN_ITEM"		, MVC_VIEW_CANCHANGE, .F.)
 	oStruFilho:SetProperty("ZN_DIRETOR"		, MVC_VIEW_CANCHANGE, .F.)
@@ -309,33 +311,42 @@ User Function RRDV001A()
 	Local nOpc       := oModelPad:GetOperation()
 	Local lRet       := .T.
 	
-	//Se for inclus�o ou exclus�o
+	//Se for inclusao ou exclusao
 	If (nOpc == MODEL_OPERATION_UPDATE .OR. nOpc == MODEL_OPERATION_DELETE) .AND. oModelPad:GetValue("SZMMASTER", "ZM_STATUS") <> "1"
-		FWAlertError("Apenas despesas com status 'Pendente' podem ser alteradas ou exclu�das!","N�o permitido")
+		FWAlertError("Apenas despesas com status 'Pendente' podem ser alteradas ou excluidas!","Nao permitido")
 		lRet := .F.	
 	EndIf
 Return lRet
 
 
 /*/{Protheus.doc} RFAT99D
-Enviar para Aprova��o
+Enviar para Aprovacao
 @author Cesar Lopes
 @since 21/01/2026
 @version 1.0
 @type function
 /*/
 
-User Function RRDV001D()
+/*/{Protheus.doc} EnviaAprov
+Envia a despesa para aprovacao: valida comprovante obrigatorio de todos os
+itens, muda o status para Enviado (2), grava data/hora e dispara o e-mail ao
+aprovador. Reutilizada pelo menu (RRDV001D) e pelo commit (ComitRDV).
+@author Leonardo Barboza Ribeiro Leite
+@since 23/07/2026
+@type function
+/*/
+Static Function EnviaAprov()
 	Local aArea  := FWGetArea()
 	Local cSemCp := ""
+	Local lOk    := .F.
 
 	If SZM->ZM_STATUS <> "1"
-		FWAlertError("A Despesa deve estar com o status 'Pendente' para ser enviada para aprova��o!","N�o pendente")
-		Return
+		FWAlertError("A Despesa deve estar com o status Pendente para ser enviada para aprovacao!", "Nao pendente")
+		FWRestArea(aArea)
+		Return .F.
 	Endif
 
-	// Comprovante obrigatorio: todo item da despesa deve ter anexo (ZN_DIRETOR)
-	// para poder enviar para aprovacao.
+	// Comprovante obrigatorio: todo item da despesa deve ter anexo (ZN_DIRETOR).
 	DbSelectArea("SZN")
 	SZN->(DbSetOrder(1))
 	If SZN->(DbSeek(xFilial("SZN") + SZM->ZM_CODIGO))
@@ -350,16 +361,26 @@ User Function RRDV001D()
 		FWAlertError("Anexe o comprovante de TODOS os itens antes de enviar para aprovacao." + CRLF + ;
 			"Item(ns) sem comprovante: " + Left(cSemCp, Len(cSemCp) - 2), "Comprovante obrigatorio")
 		FWRestArea(aArea)
-		Return
+		Return .F.
 	EndIf
 
 	MailAprova()
 
-	RecLock("SZM",.F.)
-	SZM->ZM_STATUS := "2"
+	RecLock("SZM", .F.)
+	SZM->ZM_STATUS  := "2"
 	SZM->ZM_DTENVIO := Date()
 	SZM->ZM_HRENVIO := Time()
 	MsUnLock()
+
+	lOk := .T.
+	FWRestArea(aArea)
+Return lOk
+
+
+User Function RRDV001D()
+	Local aArea := FWGetArea()
+
+	EnviaAprov()
 
 	FWRestArea(aArea)
 Return
@@ -415,13 +436,13 @@ Static Function RRDV001E()
 	aadd(aVetSE2, {"E2_HIST"   , "DESPESAS DE VIAGEM" , Nil})
 	aadd(aVetSE2, {"E2_MOEDA"  , 1                    , Nil})
 
-	//Inicia o controle de transa��o
+	//Inicia o controle de transacao
 	Begin Transaction
-		//Chama a rotina autom�tica
+		//Chama a rotina automatica
 		lMsErroAuto := .F.
 		MSExecAuto({|x,y| FINA050(x,y)}, aVetSE2, 3)
 
-		//Se houve erro, mostra o erro ao usu�rio e desarma a transa��o
+		//Se houve erro, mostra o erro ao usuario e desarma a transacao
 		If lMsErroAuto
 			MostraErro()
 			DisarmTransaction()
@@ -434,7 +455,7 @@ Static Function RRDV001E()
 			SZN->ZN_RECSE2 := SE2->(RECNO())
 			MsUnLock()			
 		EndIf
-		//Finaliza a transa��o
+		//Finaliza a transacao
 	End Transaction
 
 Return
@@ -463,19 +484,19 @@ User Function RRDV001F()
 	
 	If Alltrim(SZM->ZM_APROV) <> RetCodUsr()
 		FWAlertError("Apenas o aprovador " + Alltrim(SZM->ZM_APROV) + " - " + Alltrim(UsrRetName(Alltrim(SZM->ZM_APROV))) +;
-		" pode aprovar esta despesa de viagem! Despesa n�mero " + Alltrim(SZM->ZM_CODIGO),;
-		"Aprovador " + Alltrim(RetCodUsr()) + " - " + Alltrim(UsrRetName(Alltrim(RetCodUsr()))) + " inv�lido")
+		" pode aprovar esta despesa de viagem! Despesa numero " + Alltrim(SZM->ZM_CODIGO),;
+		"Aprovador " + Alltrim(RetCodUsr()) + " - " + Alltrim(UsrRetName(Alltrim(RetCodUsr()))) + " invalido")
 		FWRestArea(aArea)
 		Return
 	Endif
 
 	If SZM->ZM_STATUS <> "2"
-		FWAlertError("A Despesa deve estar com o status 'Enviado para Aprova��o' para ser Aprovada!","N�o aprovado ou pago")
+		FWAlertError("A Despesa deve estar com o status 'Enviado para Aprovacao' para ser Aprovada!","Nao aprovado ou pago")
 		FWRestArea(aArea)
 		Return
 	Endif
 
-	nRet := FWExecView('Aprova��o de Despesa de Viagem', 'RRDVC001', MODEL_OPERATION_VIEW,,,,, aEnable)
+	nRet := FWExecView('Aprovacao de Despesa de Viagem', 'RRDVC001', MODEL_OPERATION_VIEW,,,,, aEnable)
 
 	FWRestArea(aArea)
 
@@ -485,7 +506,7 @@ Static Function Aprova()
 
 	Local aArea := FWGetArea()
 
-	If !FwAlertYesNo("Confirma a aprova��o desta despesa de viagem e gera��o do lan�amento financeiro?", "Confirma��o de Aprova��o")
+	If !FwAlertYesNo("Confirma a aprovacao desta despesa de viagem e geracao do lancamento financeiro?", "Confirmacao de Aprovacao")
 		FWRestArea(aArea)
 		Return
 	EndIf
@@ -509,7 +530,7 @@ Static Function Aprova()
 		MsUnLock()
 	End Transaction
 
-	fwAlertSuccess("Despesa de Viagem Aprovada com sucesso!","Aprova��o realizada")
+	fwAlertSuccess("Despesa de Viagem Aprovada com sucesso!","Aprovacao realizada")
 	
 	FWRestArea(aArea)
 
@@ -531,18 +552,18 @@ User Function RRDV001G()
 	aEnable[8][2] := "Fechar"	
 
 	/*If SZM->ZM_APROV <> RetCodUsr()
-		FWAlertError("Apenas o aprovador designado pode rejeitar esta despesa de viagem!","Aprovador inv�lido")
+		FWAlertError("Apenas o aprovador designado pode rejeitar esta despesa de viagem!","Aprovador invalido")
 		FWRestArea(aArea)
 		Return
 	Endif*/
 
 	If SZM->ZM_STATUS <> "2"
-		FWAlertError("A Despesa deve estar com o status 'Enviado para Aprova��o' para ser Reprovada!","N�o aprovado ou pago")
+		FWAlertError("A Despesa deve estar com o status 'Enviado para Aprovacao' para ser Reprovada!","Nao aprovado ou pago")
 		FWRestArea(aArea)
 		Return
 	Endif
 
-	nRet := FWExecView('Reprova��o de Despesa de Viagem', 'RRDVC001', MODEL_OPERATION_VIEW,,,,, aEnable)
+	nRet := FWExecView('Reprovacao de Despesa de Viagem', 'RRDVC001', MODEL_OPERATION_VIEW,,,,, aEnable)
 
 	FWRestArea(aArea)
 
@@ -554,7 +575,7 @@ Static Function Reprova()
     Local nCorFundo     := RGB(238, 238, 238)
     Local nJanAltura    := 154
     Local nJanLargur    := 318
-    Local cJanTitulo    := 'Justificativa de Reprova��o'
+    Local cJanTitulo    := 'Justificativa de Reprovacao'
     Local lDimPixels    := .T.
     Local lCentraliz    := .T.
     Local nObjLinha     := 0
@@ -575,7 +596,7 @@ Static Function Reprova()
     Private cBtnObj1    := 'Confirmar'
     Private bBtnObj1    :={|| lContinua := IIf(Empty(cMulObj0), .F., .T.), oDialogPvt:End()}
 
-   	If !FwAlertYesNo("Confirma a reprova��o desta despesa de viagem e retorno da mesma ao status 'Pendente'?", "Confirma��o de Reprova��o")
+   	If !FwAlertYesNo("Confirma a reprovacao desta despesa de viagem e retorno da mesma ao status 'Pendente'?", "Confirmacao de Reprovacao")
 		FWRestArea(aArea)
 		Return
 	EndIf
@@ -602,7 +623,7 @@ Static Function Reprova()
     oDialogPvt:Activate(, , , lCentraliz, , , bBlocoIni)
 
 	If !lContinua
-		FWAlertError("Para Rejei��o � obrigat�rio informar o motivo!","Motivo n�o informado	")
+		FWAlertError("Para Rejeicao e obrigatorio informar o motivo!","Motivo nao informado	")
 		FWRestArea(aArea)
 		Return
 	Endif	
@@ -616,14 +637,14 @@ Static Function Reprova()
 	SZM->ZM_LOGAPRO := cMulObj0
 	MsUnLock()
 
-	fwAlertSuccess("Despesa de Viagem Reprovada com sucesso!","Reprova��o realizada")
+	fwAlertSuccess("Despesa de Viagem Reprovada com sucesso!","Reprovacao realizada")
 
 	FWRestArea(aArea)
 
 Return
 
 Static Function MailAprova()
-	Local cAssunto := "Despesa de Viagem para Aprova��o"
+	Local cAssunto := "Despesa de Viagem para Aprovacao"
 	Local cMsg     := ""
 	Local cEmail   := Alltrim( UsrRetMail(Alltrim(SZM->ZM_APROV)) )
 	Local cBOF    := Chr(13) + Chr(10)
@@ -632,7 +653,7 @@ Static Function MailAprova()
 	cMsg += '<html lang="pt-BR">' + cBOF
 	cMsg += '<head>' + cBOF
 	cMsg += '    <meta charset="UTF-8">' + cBOF
-	cMsg += '    <title>Solicita��o de Aprova��o - Despesas de Viagem</title>' + cBOF
+	cMsg += '    <title>Solicitacao de Aprovacao - Despesas de Viagem</title>' + cBOF
 	cMsg += '</head>' + cBOF
 	cMsg += '<body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, Helvetica, sans-serif; color:#333333;">' + cBOF
 	cMsg += cBOF
@@ -647,14 +668,14 @@ Static Function MailAprova()
 	cMsg += '          <td>' + cBOF
 	cMsg += cBOF
 
-	cMsg += '            <h2 style="margin-top:0; color:#2c3e50;">Solicita��o de Aprova��o de Despesas de Viagem</h2>' + cBOF
+	cMsg += '            <h2 style="margin-top:0; color:#2c3e50;">Solicitacao de Aprovacao de Despesas de Viagem</h2>' + cBOF
 
 	cMsg += '            <p style="line-height:1.6;">' + cBOF
-	cMsg += '              O usu�rio <strong>' + Alltrim( UsrFullName(Alltrim(SZM->ZM_USUARIO)) )+ '</strong> enviou uma solicita��o de aprova��o de ' + cBOF
-	cMsg += '              <strong>Despesas de Viagem</strong> referente ao per�odo <strong>' + Alltrim(SZM->ZM_PERIODO) + '</strong>.' + cBOF
+	cMsg += '              O usuario <strong>' + Alltrim( UsrFullName(Alltrim(SZM->ZM_USUARIO)) )+ '</strong> enviou uma solicitacao de aprovacao de ' + cBOF
+	cMsg += '              <strong>Despesas de Viagem</strong> referente ao periodo <strong>' + Alltrim(SZM->ZM_PERIODO) + '</strong>.' + cBOF
 	cMsg += '            </p>' + cBOF
 
-	cMsg += '            <p style="line-height:1.6;">Segue abaixo a rela��o dos itens informados:</p>' + cBOF
+	cMsg += '            <p style="line-height:1.6;">Segue abaixo a relacao dos itens informados:</p>' + cBOF
 	cMsg += cBOF
 
 	cMsg += '            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin-top:20px;">' + cBOF
@@ -662,7 +683,7 @@ Static Function MailAprova()
 	cMsg += '                <tr>' + cBOF
 	cMsg += '                  <th align="left"  style="background-color:#2c3e50; color:#ffffff; padding:10px; font-size:13px;">Item</th>' + cBOF
 	cMsg += '                  <th align="left"  style="background-color:#2c3e50; color:#ffffff; padding:10px; font-size:13px;">Natureza</th>' + cBOF
-	cMsg += '                  <th align="left"  style="background-color:#2c3e50; color:#ffffff; padding:10px; font-size:13px;">Descri��o da Natureza</th>' + cBOF
+	cMsg += '                  <th align="left"  style="background-color:#2c3e50; color:#ffffff; padding:10px; font-size:13px;">Descricao da Natureza</th>' + cBOF
 	cMsg += '                  <th align="left"  style="background-color:#2c3e50; color:#ffffff; padding:10px; font-size:13px;">Centro de Custo</th>' + cBOF
 	cMsg += '                  <th align="right" style="background-color:#2c3e50; color:#ffffff; padding:10px; font-size:13px;">Valor (R$)</th>' + cBOF
 	cMsg += '                </tr>' + cBOF
@@ -700,16 +721,16 @@ Static Function MailAprova()
 	cMsg += '            <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:25px;">' + cBOF
 	cMsg += '              <tr>' + cBOF
 	cMsg += '                <td style="background-color:#fff8e1; border-left:4px solid #f1c40f; padding:15px; font-size:13px; line-height:1.6;">' + cBOF
-	cMsg += '                  <strong>Aten��o:</strong><br>' + cBOF
-	cMsg += '                  Para realizar a <strong>aprova��o ou rejei��o</strong> desta solicita��o, ' + cBOF
-	cMsg += '                  o usu�rio respons�vel dever� acessar a rotina de <strong>Lan�amento RDV</strong> no ' + cBOF
+	cMsg += '                  <strong>Atencao:</strong><br>' + cBOF
+	cMsg += '                  Para realizar a <strong>aprovacao ou rejeicao</strong> desta solicitacao, ' + cBOF
+	cMsg += '                  o usuario responsavel devera acessar a rotina de <strong>Lancamento RDV</strong> no ' + cBOF
 	cMsg += '                  <strong>Totvs Protheus</strong>.' + cBOF
 	cMsg += '                </td>' + cBOF
 	cMsg += '              </tr>' + cBOF
 	cMsg += '            </table>' + cBOF
 
 	cMsg += '            <p style="margin-top:30px; font-size:12px; color:#777777; text-align:center;">' + cBOF
-	cMsg += '              Esta � uma mensagem autom�tica. Por favor, n�o responda este e-mail.' + cBOF
+	cMsg += '              Esta e uma mensagem automatica. Por favor, nao responda este e-mail.' + cBOF
 	cMsg += '            </p>' + cBOF
 
 	cMsg += '          </td>' + cBOF
@@ -739,7 +760,7 @@ Static Function MailReprova()
 	cMsg += '<html lang="pt-BR">' + cBOF
 	cMsg += '<head>' + cBOF
 	cMsg += '    <meta charset="UTF-8">' + cBOF
-	cMsg += '    <title>Solicita��o Reprovada - Despesas de Viagem</title>' + cBOF
+	cMsg += '    <title>Solicitacao Reprovada - Despesas de Viagem</title>' + cBOF
 	cMsg += '</head>' + cBOF
 	cMsg += '<body style="margin:0; padding:0; background-color:#f4f6f8; font-family:Arial, Helvetica, sans-serif; color:#333333;">' + cBOF
 	cMsg += cBOF
@@ -754,16 +775,16 @@ Static Function MailReprova()
 	cMsg += '          <td>' + cBOF
 	cMsg += cBOF
 
-	cMsg += '            <h2 style="margin-top:0; color:#c0392b;">Solicita��o de Despesas de Viagem Reprovada</h2>' + cBOF
+	cMsg += '            <h2 style="margin-top:0; color:#c0392b;">Solicitacao de Despesas de Viagem Reprovada</h2>' + cBOF
 
 	cMsg += '            <p style="line-height:1.6;">' + cBOF
-	cMsg += '              A solicita��o de n�mero <strong>' + Alltrim(SZM->ZM_CODIGO) + '</strong>, inclu�da pelo usu�rio ' + cBOF
-	cMsg += '              <strong>' + Alltrim( UsrFullName(Alltrim(SZM->ZM_USUARIO)) )+ '</strong>, foi <strong>reprovada</strong> pelo usu�rio ' + cBOF
+	cMsg += '              A solicitacao de numero <strong>' + Alltrim(SZM->ZM_CODIGO) + '</strong>, incluida pelo usuario ' + cBOF
+	cMsg += '              <strong>' + Alltrim( UsrFullName(Alltrim(SZM->ZM_USUARIO)) )+ '</strong>, foi <strong>reprovada</strong> pelo usuario ' + cBOF
 	cMsg += '              <strong>' + Alltrim( UsrFullName(Alltrim(SZM->ZM_APROV)) )+ '</strong>.' + cBOF
 	cMsg += '            </p>' + cBOF
 
 	cMsg += '            <p style="line-height:1.6;">' + cBOF
-	cMsg += '              O motivo da reprova��o segue abaixo:' + cBOF
+	cMsg += '              O motivo da reprovacao segue abaixo:' + cBOF
 	cMsg += '            </p>' + cBOF
 	cMsg += cBOF
 
@@ -776,13 +797,13 @@ Static Function MailReprova()
 	cMsg += '            </table>' + cBOF
 
 	cMsg += '            <p style="margin-top:25px; font-size:13px; line-height:1.6;">' + cBOF
-	cMsg += '              Caso necess�rio, o usu�rio poder� ajustar as informa��es e reenviar a solicita��o ' + cBOF
-	cMsg += '              para nova an�lise na rotina de <strong>Lan�amento RDV</strong> do ' + cBOF
+	cMsg += '              Caso necessario, o usuario podera ajustar as informacoes e reenviar a solicitacao ' + cBOF
+	cMsg += '              para nova analise na rotina de <strong>Lancamento RDV</strong> do ' + cBOF
 	cMsg += '              <strong>Totvs Protheus</strong>.' + cBOF
 	cMsg += '            </p>' + cBOF
 
 	cMsg += '            <p style="margin-top:30px; font-size:12px; color:#777777; text-align:center;">' + cBOF
-	cMsg += '              Esta � uma mensagem autom�tica. Por favor, n�o responda este e-mail.' + cBOF
+	cMsg += '              Esta e uma mensagem automatica. Por favor, nao responda este e-mail.' + cBOF
 	cMsg += '            </p>' + cBOF
 
 	cMsg += '          </td>' + cBOF
@@ -813,14 +834,14 @@ Banco de Conhecimento
 User Function RRDV001H()
 	Local aArquivos := {}
 	Local nIdx
-	Local cDirDoc   := Alltrim(GetMv("MV_DIRDOC"))                 // Diret�rio destino dos arquivos no PROTHEUS
+	Local cDirDoc   := Alltrim(GetMv("MV_DIRDOC"))                 // Diretorio destino dos arquivos no PROTHEUS
 	Local cPathBco := cDirDoc + "co01\shared\"
 	Local cCodEnt
 	//Local oView       := FWViewActive()
 	Local oModel       := FWModelActive()
 	Local oMdGrid	 := oModel:GetModel("SZNDETAIL")
 
-	If !FWAlertYesNo("Confirma a anexa��o de arquivos ao Banco de Conhecimento para o item " + Alltrim(oMdGrid:GetValue("ZN_ITEM")) + " - " + Alltrim(oMdGrid:GetValue("ZN_DESCRDV"))+"?", "Confirma��o de Anexa��o de Arquivos")
+	If !FWAlertYesNo("Confirma a anexacao de arquivos ao Banco de Conhecimento para o item " + Alltrim(oMdGrid:GetValue("ZN_ITEM")) + " - " + Alltrim(oMdGrid:GetValue("ZN_DESCRDV"))+"?", "Confirmacao de Anexacao de Arquivos")
 		Return
 	Endif
 	
@@ -843,7 +864,7 @@ User Function RRDV001H()
 		DbSelectArea("SZN")
 		DbSetOrder(1)
 		If !SZN->(DbSeek( xFilial("SZN") + oMdGrid:GetValue("ZN_CODIGO") + oMdGrid:GetValue("ZN_ITEM") + oMdGrid:GetValue("ZN_NATUREZ")))
-			FWAlertError("Registro ainda n�o foi salvo. Por favor, salve o registro antes de anexar os arquivos.","Registro n�o salvo")
+			FWAlertError("Registro ainda nao foi salvo. Por favor, salve o registro antes de anexar os arquivos.","Registro nao salvo")
 			Return
 		EndIf
 		cCodEnt := FWxFilial("SZN") + oMdGrid:GetValue("ZN_CODIGO") + oMdGrid:GetValue("ZN_ITEM") + oMdGrid:GetValue("ZN_NATUREZ")
@@ -866,7 +887,7 @@ User Function RRDV001H()
 		Replace ACB->ACB_DESCRI with cDesc
 		ACB->(MsUnlock())
 
-		// -- Rela��o de Objetos x Entidade
+		// -- Relacao de Objetos x Entidade
 		// --------------------------------
 		Reclock("AC9",.T.)
 		Replace AC9->AC9_FILIAL with FWxFilial("AC9")
@@ -884,7 +905,7 @@ User Function RRDV001H()
 Return
 
 /*/{Protheus.doc} SelArq
-Sele��o de arquivos
+Selecao de arquivos
 @author Cesar Lopes
 @since 21/01/2026
 @version 1.0
@@ -899,19 +920,19 @@ Static Function SelArq()
 	LocAL aArqs    := {}
 
 	
-	//Configura��es da Janela de Sele��o de Arquivos
+	//Configuracoes da Janela de Selecao de Arquivos
     
-	cTipArq := "Todas extens�es (*.*) | Arquivos imagem (*.png) | Arquivos imagem (*.jpg) | Arquivos PDF (*.pdf)"
-    cTitulo := "Sele��o de Arquivos de Despesas de Viagem"
+	cTipArq := "Todas extensoes (*.*) | Arquivos imagem (*.png) | Arquivos imagem (*.jpg) | Arquivos PDF (*.pdf)"
+    cTitulo := "Selecao de Arquivos de Despesas de Viagem"
     cArqSel := tFileDialog(;
-        cTipArq,;                  // Filtragem de tipos de arquivos que ser�o selecionados
-        cTitulo,;                  // T�tulo da Janela para sele��o dos arquivos
+        cTipArq,;                  // Filtragem de tipos de arquivos que serao selecionados
+        cTitulo,;                  // Titulo da Janela para selecao dos arquivos
         ,;                         // Compatibilidade
-        /*cDirIni*/,;                  // Diret�rio inicial da busca de arquivos
-        lSalvar,;                  // Se for .T., ser� uma Save Dialog, sen�o ser� Open Dialog
+        /*cDirIni*/,;                  // Diretorio inicial da busca de arquivos
+        lSalvar,;                  // Se for .T., sera uma Save Dialog, senao sera Open Dialog
 		;
 	)
-        /*GETF_MULTISELECT;          // Se n�o passar par�metro, ir� pegar apenas 1 arquivo; Se for informado GETF_MULTISELECT ser� poss�vel pegar mais de 1 arquivo; Se for informado GETF_RETDIRECTORY ser� poss�vel selecionar o diret�rio
+        /*GETF_MULTISELECT;          // Se nao passar parametro, ira pegar apenas 1 arquivo; Se for informado GETF_MULTISELECT sera possivel pegar mais de 1 arquivo; Se for informado GETF_RETDIRECTORY sera possivel selecionar o diretorio
     )*/
 	
 	aArqs := StrTokArr(cArqSel, ";")
@@ -928,12 +949,12 @@ User Function RRDV001I()
 	Local cCodObj  := Alltrim(oMdGrid:GetValue("ZN_DIRETOR"))
 
 	If Empty(cCodObj)
-		FWAlertError("Nenhum documento anexado ao item selecionado.","Documento n�o encontrado")
+		FWAlertError("Nenhum documento anexado ao item selecionado.","Documento nao encontrado")
 		FWRestArea(aArea)
 		Return
 	Endif	
     
-    //Se veio c�digo de objeto
+    //Se veio codigo de objeto
     If ! Empty(cCodObj)
  
         DbSelectArea("ACB")
@@ -965,7 +986,11 @@ os anexos pendentes selecionados no INCLUIR (item 3).
 @type function
 /*/
 Static Function ComitRDV(oMdl)
-	Local lOk := .T.
+	Local lOk     := .T.
+	Local nOper   := oMdl:GetOperation()
+	Local cUsuBen := ""
+	Local cCodigo := ""
+	Local aArea   := {}
 
 	// Commit padrao (grava SZM/SZN e gera o codigo do RDV)...
 	lOk := FWFormCommit(oMdl)
@@ -973,6 +998,26 @@ Static Function ComitRDV(oMdl)
 	// ...e so depois grava os anexos pendentes do INCLUIR, com o codigo ja gerado.
 	If lOk .And. !Empty(aPendAnexo)
 		ProcAnexoPend(oMdl)
+	EndIf
+
+	// Item 1: ao gravar (Inclusao/Alteracao) uma RDV cujo usuario do fornecedor
+	// (ZM_USUARIO) e diferente do usuario logado (lancamento para outra pessoa),
+	// oferece enviar para aprovacao ja na gravacao.
+	If lOk .And. (nOper == MODEL_OPERATION_INSERT .Or. nOper == MODEL_OPERATION_UPDATE)
+		cUsuBen := AllTrim(oMdl:GetValue("SZMMASTER", "ZM_USUARIO"))
+		cCodigo := AllTrim(oMdl:GetValue("SZMMASTER", "ZM_CODIGO"))
+		If !Empty(cUsuBen) .And. cUsuBen <> AllTrim(RetCodUsr())
+			If !IsBlind() .And. FwAlertYesNo("Esta despesa foi lancada para o usuario " + cUsuBen + ;
+				", diferente do seu. Deseja enviar para aprovacao agora?", "Enviar para aprovacao")
+				aArea := FWGetArea()
+				DbSelectArea("SZM")
+				SZM->(DbSetOrder(1))   // ZM_FILIAL + ZM_CODIGO
+				If SZM->(DbSeek(xFilial("SZM") + PadR(cCodigo, TamSX3("ZM_CODIGO")[1]))) .And. AllTrim(SZM->ZM_CODIGO) == cCodigo
+					EnviaAprov()
+				EndIf
+				FWRestArea(aArea)
+			EndIf
+		EndIf
 	EndIf
 
 Return lOk

@@ -30,6 +30,7 @@ User Function COMCOLRT()
 	If SDS->(FieldPos("DS_XCIENC")) > 0
 		//        Titulo               Funcao        0  Oper.  0  Acessa
 		aAdd(aRotina, {"Desconsiderar Doc.", "U_COMCOLDES", 0, 4, 0, .F.})
+		aAdd(aRotina, {"Upload de XML"     , "U_upXmlCko" , 0, 4, 0, .F.})
 	EndIf
 
 Return aRotina
